@@ -1,8 +1,8 @@
-"""Vault dei segreti: un file binario cifrato con AES-256-GCM.
+"""Secrets vault: a binary file encrypted with AES-256-GCM.
 
-Layout di vault.enc (interi big-endian):
+Layout of vault.enc (big-endian integers):
 
-    offset  size  campo
+    offset  size  field
     0       4     magic            b"HSMV"
     4       1     format_version   1
     5       1     kdf_id           1 = Argon2id v1.3
@@ -13,17 +13,17 @@ Layout di vault.enc (interi big-endian):
     16      16    salt
     32      1     nonce_len        u8 (12)
     33      12    nonce
-    45      ...   ciphertext || tag GCM (16 byte)
+    45      ...   ciphertext || GCM tag (16 bytes)
 
-I primi 45 byte (l'header) sono in chiaro e vengono passati a GCM come
-"associated data": non sono cifrati ma sono autenticati, quindi qualsiasi
-modifica all'header fa fallire la decifratura.
+The first 45 bytes (the header) are in clear and are passed to GCM as
+"associated data": they are not encrypted but they are authenticated, so any
+change to the header makes decryption fail.
 
-Il payload decifrato è JSON:
+The decrypted payload is JSON:
     {"schema": 1, "entries": {"<alias>": {"password": "...", "updated_at": "..."}}}
 
-Questo modulo non chiede password e non parla con il Keychain: riceve una
-password e restituisce una chiave, oppure riceve una chiave e legge/scrive.
+This module doesn't ask for passwords and doesn't talk to the Keychain: it
+receives a password and returns a key, or receives a key and reads/writes.
 """
 
 import hashlib
@@ -49,28 +49,28 @@ FORMAT_VERSION = 1
 KDF_ARGON2ID = 1
 PAYLOAD_SCHEMA = 1
 
-# AES-256: chiave da 32 byte. 256 bit invece di 128 non per paura di un
-# attacco reale ad AES-128, ma perché il costo è nullo e dà margine anche
-# contro scenari futuri (es. Grover su computer quantistici).
+# AES-256: 32-byte key. 256 bits instead of 128 not out of fear of a real
+# attack on AES-128, but because the cost is nil and it leaves margin even
+# against future scenarios (e.g. Grover on quantum computers).
 KEY_SIZE = 32
 
-# Salt da 128 bit, il minimo raccomandato da RFC 9106. Non è segreto: serve
-# solo a far sì che la stessa password dia chiavi diverse su vault diversi,
-# rendendo inutili le tabelle precalcolate.
+# 128-bit salt, the minimum recommended by RFC 9106. It is not secret: it
+# only makes the same password yield different keys on different vaults,
+# making precomputed tables useless.
 SALT_SIZE = 16
 
-# Nonce da 96 bit: è la dimensione nativa di GCM (altre lunghezze passano da
-# un hash interno). Generato casuale a ogni scrittura: con 96 bit la
-# probabilità di collisione resta trascurabile per miliardi di scritture.
+# 96-bit nonce: it is GCM's native size (other lengths go through an
+# internal hash). Generated at random on every write: with 96 bits the
+# collision probability stays negligible for billions of writes.
 NONCE_SIZE = 12
 TAG_SIZE = 16
 
 _HEADER = struct.Struct(">4sBBIIBB16sB12s")
 HEADER_SIZE = _HEADER.size  # 45
 
-# Tetti ai parametri dichiarabili nell'header (circa il doppio del default):
-# un file manomesso non deve poterci far allocare gigabyte o calcolare per
-# minuti prima ancora di arrivare a verificare il tag.
+# Caps on the parameters a header can declare (about twice the default):
+# a tampered file must not be able to make us allocate gigabytes or compute
+# for minutes before we even get to check the tag.
 MAX_MEMORY_KIB = 524_288  # 512 MiB
 MAX_TIME_COST = 8
 MAX_PARALLELISM = 64
@@ -78,7 +78,7 @@ MAX_PARALLELISM = 64
 
 @dataclass(frozen=True)
 class KdfParams:
-    """Parametri di Argon2id. Sono salvati nell'header di ogni vault."""
+    """Argon2id parameters. They are stored in the header of every vault."""
 
     memory_cost_kib: int
     time_cost: int
@@ -86,25 +86,25 @@ class KdfParams:
 
     def __post_init__(self) -> None:
         if not 1 <= self.parallelism <= MAX_PARALLELISM:
-            raise ValueError(f"parallelism fuori intervallo: {self.parallelism}")
+            raise ValueError(f"parallelism out of range: {self.parallelism}")
         if not 1 <= self.time_cost <= MAX_TIME_COST:
-            raise ValueError(f"time_cost fuori intervallo: {self.time_cost}")
-        # Argon2 richiede almeno 8 KiB per lane.
+            raise ValueError(f"time_cost out of range: {self.time_cost}")
+        # Argon2 requires at least 8 KiB per lane.
         if not 8 * self.parallelism <= self.memory_cost_kib <= MAX_MEMORY_KIB:
-            raise ValueError(f"memory_cost fuori intervallo: {self.memory_cost_kib}")
+            raise ValueError(f"memory_cost out of range: {self.memory_cost_kib}")
 
 
-# Argon2id, la variante raccomandata da RFC 9106: resiste sia agli attacchi
-# side-channel (come Argon2i) sia al cracking con GPU/ASIC (come Argon2d).
-# 256 MiB e 3 passate costano ~0,15 s su Apple Silicon (misurato): poco per
-# un unlock, ma ogni tentativo di brute force deve pagare 256 MiB di RAM.
-# 4 lane sfruttano i core per l'utente senza ridurre il costo per chi attacca.
+# Argon2id, the variant recommended by RFC 9106: it resists both side-channel
+# attacks (like Argon2i) and GPU/ASIC cracking (like Argon2d).
+# 256 MiB and 3 passes cost ~0.15 s on Apple Silicon (measured): little for
+# an unlock, but every brute-force attempt has to pay 256 MiB of RAM.
+# 4 lanes use the cores for the user without lowering the cost for an attacker.
 DEFAULT_KDF = KdfParams(memory_cost_kib=262_144, time_cost=3, parallelism=4)
 
 
 @dataclass(frozen=True)
 class VaultHeader:
-    """La parte in chiaro (ma autenticata) del file."""
+    """The clear (but authenticated) part of the file."""
 
     params: KdfParams
     salt: bytes
@@ -127,93 +127,93 @@ class VaultHeader:
     @classmethod
     def unpack(cls, data: bytes) -> Self:
         if len(data) < HEADER_SIZE:
-            raise VaultFormatError("Il file del vault è troncato.")
+            raise VaultFormatError("The vault file is truncated.")
         magic, version, kdf_id, mem, t, p, salt_len, salt, nonce_len, nonce = (
             _HEADER.unpack_from(data)
         )
         if magic != MAGIC:
-            raise VaultFormatError("Il file non è un vault hsm.")
+            raise VaultFormatError("The file is not an hsm vault.")
         if version != FORMAT_VERSION:
-            raise VaultFormatError(f"Formato del vault in versione {version} non supportato.")
+            raise VaultFormatError(f"Vault format version {version} is not supported.")
         if kdf_id != KDF_ARGON2ID or salt_len != SALT_SIZE or nonce_len != NONCE_SIZE:
-            raise VaultFormatError("Header del vault non valido.")
+            raise VaultFormatError("Invalid vault header.")
         try:
             params = KdfParams(memory_cost_kib=mem, time_cost=t, parallelism=p)
         except ValueError as exc:
-            raise VaultFormatError(f"Parametri KDF del vault non validi: {exc}") from None
+            raise VaultFormatError(f"Invalid vault KDF parameters: {exc}") from None
         return cls(params=params, salt=salt, nonce=nonce)
 
 
 @dataclass(frozen=True)
 class VaultEntry:
-    """Una password salvata. Il repr non mostra la password (è un Secret)."""
+    """A saved password. The repr doesn't show the password (it's a Secret)."""
 
     password: Secret
     updated_at: str
 
     @classmethod
     def new(cls, password: Secret) -> Self:
-        """Crea una voce con timestamp UTC corrente."""
+        """Create an entry with the current UTC timestamp."""
         return cls(password=password, updated_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
 
-# --- API pubblica -------------------------------------------------------------
+# --- public API ---------------------------------------------------------------
 
 
 def create(path: Path, password: Secret, params: KdfParams = DEFAULT_KDF) -> Secret:
-    """Crea un vault vuoto e restituisce la chiave derivata.
+    """Create an empty vault and return the derived key.
 
-    Il salt viene generato qui, una sola volta: resta lo stesso per tutta la
-    vita del vault (cambia solo con `rekey`).
+    The salt is generated here, only once: it stays the same for the whole
+    life of the vault (it changes only with `rekey`).
     """
     _require_password(password)
     ensure_private_dir(path.parent)
     if os.path.lexists(path):
-        raise VaultError(f"Esiste già un vault in {path}.")
-    # secrets usa il CSPRNG del sistema operativo (come os.urandom); il nome
-    # del modulo rende esplicito che questi byte servono alla sicurezza.
+        raise VaultError(f"A vault already exists at {path}.")
+    # secrets uses the operating system's CSPRNG (like os.urandom); the module
+    # name makes it explicit that these bytes serve security.
     salt = secrets.token_bytes(SALT_SIZE)
     key = _derive(password, salt, params)
     try:
-        # exclusive: se un altro processo ha creato il vault mentre noi
-        # derivavamo la chiave, falliamo invece di cancellare il suo.
+        # exclusive: if another process created the vault while we were
+        # deriving the key, we fail instead of erasing theirs.
         _write(path, key, params, salt, {}, exclusive=True)
     except FileExistsError:
-        raise VaultError(f"Esiste già un vault in {path}.") from None
+        raise VaultError(f"A vault already exists at {path}.") from None
     return key
 
 
 def read_header(path: Path) -> VaultHeader:
-    """Legge l'header: serve a derivare la chiave (salt, parametri) e a `key_id`."""
+    """Read the header: needed to derive the key (salt, parameters) and for `key_id`."""
     return VaultHeader.unpack(_read(path))
 
 
 def derive_key(password: Secret, header: VaultHeader) -> Secret:
-    """Deriva la chiave del vault dalla master password (Argon2id)."""
+    """Derive the vault key from the master password (Argon2id)."""
     return _derive(password, header.salt, header.params)
 
 
 def load(path: Path, key: Secret) -> dict[str, VaultEntry]:
-    """Decifra il vault e restituisce le voci per alias."""
+    """Decrypt the vault and return the entries by alias."""
     data = _read(path)
     return _decode(_decrypt(key, data))
 
 
 def verify(path: Path, key: Secret) -> None:
-    """Verifica che `key` apra il vault, senza decodificare le voci.
+    """Check that `key` opens the vault, without decoding the entries.
 
-    Solleva VaultAuthError se la chiave è sbagliata. GCM non sa verificare
-    senza decifrare, quindi il testo in chiaro esiste comunque per un attimo
-    come bytes immutabili; evitiamo almeno di trasformarlo in oggetti.
+    Raises VaultAuthError if the key is wrong. GCM cannot verify without
+    decrypting, so the plaintext still exists for a moment as immutable
+    bytes; we at least avoid turning it into objects.
     """
     _decrypt(key, _read(path))
 
 
 def save(path: Path, key: Secret, entries: dict[str, VaultEntry]) -> None:
-    """Riscrive il vault con `entries`, con un nonce nuovo.
+    """Rewrite the vault with `entries`, with a new nonce.
 
-    Prima verifica che `key` apra il vault esistente: altrimenti una chiave
-    sbagliata produrrebbe un file che la master password non apre più.
+    It first checks that `key` opens the existing vault: otherwise a wrong
+    key would produce a file the master password can no longer open.
     """
     data = _read(path)
     header = VaultHeader.unpack(data)
@@ -224,11 +224,11 @@ def save(path: Path, key: Secret, entries: dict[str, VaultEntry]) -> None:
 def rekey(
     path: Path, old_key: Secret, new_password: Secret, params: KdfParams = DEFAULT_KDF
 ) -> Secret:
-    """Cambia master password: nuovo salt, nuova chiave, stesse voci.
+    """Change the master password: new salt, new key, same entries.
 
-    Il salt nuovo fa sì che la vecchia chiave (anche se rubata dal Keychain)
-    non apra il nuovo file. La scrittura è atomica: in caso di crash resta
-    il vault vecchio, intero.
+    The new salt ensures the old key (even if stolen from the Keychain)
+    doesn't open the new file. The write is atomic: on a crash the old
+    vault remains, intact.
     """
     _require_password(new_password)
     entries = load(path, old_key)
@@ -239,20 +239,20 @@ def rekey(
 
 
 def key_id(header: VaultHeader) -> str:
-    """Identificativo stabile del vault, usato come nome dell'item Keychain.
+    """Stable vault identifier, used as the name of the Keychain item.
 
-    È un hash del salt (pubblico), non materiale crittografico: serve solo a
-    far sì che dopo `rekey` la chiave vecchia nel Keychain non venga trovata.
+    It is a hash of the (public) salt, not cryptographic material: it only
+    ensures that after `rekey` the old key in the Keychain is not found.
     """
     return hashlib.sha256(header.salt).hexdigest()[:16]
 
 
-# --- interni ------------------------------------------------------------------
+# --- internals ----------------------------------------------------------------
 
 
 def _require_password(password: Secret) -> None:
     if len(password) == 0:
-        raise VaultError("La master password non può essere vuota.")
+        raise VaultError("The master password cannot be empty.")
 
 
 def _read(path: Path) -> bytes:
@@ -260,7 +260,7 @@ def _read(path: Path) -> bytes:
         return read_private(path)
     except FileNotFoundError:
         raise VaultError(
-            f"Vault non trovato in {path}. Crealo con: hsm pw set <alias>"
+            f"Vault not found at {path}. Create it with: hsm pw set <alias>"
         ) from None
 
 
@@ -272,8 +272,8 @@ def _derive(password: Secret, salt: bytes, params: KdfParams) -> Secret:
         lanes=params.parallelism,
         memory_cost=params.memory_cost_kib,
     )
-    # derive() restituisce bytes immutabili: li avvolgiamo subito in un
-    # Secret, ma la copia originale resta in memoria fino al GC (limite noto).
+    # derive() returns immutable bytes: we wrap them in a Secret right away,
+    # but the original copy stays in memory until GC (known limitation).
     return Secret(kdf.derive(password.view()))
 
 
@@ -281,13 +281,13 @@ def _decrypt(key: Secret, data: bytes) -> bytes:
     header = VaultHeader.unpack(data)
     ciphertext = data[HEADER_SIZE:]
     if len(ciphertext) < TAG_SIZE:
-        raise VaultFormatError("Il file del vault è troncato.")
+        raise VaultFormatError("The vault file is truncated.")
     try:
         return AESGCM(key.view()).decrypt(header.nonce, ciphertext, data[:HEADER_SIZE])
     except InvalidTag:
-        # GCM non distingue "chiave sbagliata" da "file alterato", e non
-        # vogliamo farlo noi: un messaggio unico non dà indizi a chi attacca.
-        raise VaultAuthError("Master password errata o vault corrotto.") from None
+        # GCM doesn't distinguish "wrong key" from "altered file", and we
+        # don't want to either: a single message gives an attacker no hints.
+        raise VaultAuthError("Wrong master password or corrupted vault.") from None
 
 
 def _write(
@@ -299,13 +299,13 @@ def _write(
     *,
     exclusive: bool = False,
 ) -> None:
-    # Nonce nuovo a ogni scrittura, sempre. Con GCM riusare un nonce con la
-    # stessa chiave è catastrofico: rivela lo XOR dei due testi in chiaro e
-    # permette di falsificare i tag.
+    # A new nonce on every write, always. With GCM, reusing a nonce with the
+    # same key is catastrophic: it reveals the XOR of the two plaintexts and
+    # allows forging tags.
     nonce = secrets.token_bytes(NONCE_SIZE)
     aad = VaultHeader(params=params, salt=salt, nonce=nonce).pack()
     ciphertext = AESGCM(key.view()).encrypt(nonce, _encode(entries), aad)
-    # Su disco finisce solo header + testo cifrato: il chiaro resta in memoria.
+    # Only header + ciphertext reach the disk: the plaintext stays in memory.
     atomic_write(path, aad + ciphertext, exclusive=exclusive)
 
 
@@ -315,20 +315,20 @@ def _encode(entries: dict[str, VaultEntry]) -> bytes:
         try:
             password = bytes(entry.password.view()).decode("utf-8")
         except UnicodeDecodeError:
-            # `from None`: l'eccezione originale contiene i byte della password.
-            raise VaultError(f"La password di {alias} non è UTF-8 valido.") from None
+            # `from None`: the original exception contains the password bytes.
+            raise VaultError(f"The password for {alias} is not valid UTF-8.") from None
         encoded[alias] = {"password": password, "updated_at": entry.updated_at}
     payload = {"schema": PAYLOAD_SCHEMA, "entries": encoded}
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _decode(plaintext: bytes) -> dict[str, VaultEntry]:
-    # Il testo è già autenticato, quindi un errore qui indica un bug o un
-    # vault scritto da una versione diversa, non un attacco.
+    # The text is already authenticated, so an error here points to a bug or
+    # a vault written by a different version, not an attack.
     try:
         payload = json.loads(plaintext)
         if payload["schema"] != PAYLOAD_SCHEMA:
-            raise VaultFormatError(f"Schema del payload {payload['schema']} non supportato.")
+            raise VaultFormatError(f"Payload schema {payload['schema']} is not supported.")
         return {
             str(alias): VaultEntry(
                 password=Secret.from_str(raw["password"]),
@@ -337,4 +337,4 @@ def _decode(plaintext: bytes) -> dict[str, VaultEntry]:
             for alias, raw in payload["entries"].items()
         }
     except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, AttributeError):
-        raise VaultFormatError("Contenuto del vault non valido.") from None
+        raise VaultFormatError("Invalid vault content.") from None

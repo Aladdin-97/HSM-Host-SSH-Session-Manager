@@ -14,7 +14,7 @@ FZF = "/opt/homebrew/bin/fzf"
 WEB01 = Host(alias="web01", hostname="10.0.0.1", user="deploy", port=2222, tags=("prod", "web"), note="frontend")
 DB = Host(alias="db", hostname="db.example.com", tags=("prod",))
 LAB = Host(alias="lab", hostname="lab.local")
-HOSTS = [WEB01, DB, LAB]  # già ordinati (es. per ultimo uso)
+HOSTS = [WEB01, DB, LAB]  # already sorted (e.g. by last use)
 
 
 @dataclass
@@ -55,7 +55,7 @@ def list_picker(console: Console) -> Picker:
     return Picker(which=lambda name: None, input=console.input, output=console.output)
 
 
-# --- formato -------------------------------------------------------------------
+# --- format --------------------------------------------------------------------
 
 
 def test_format_line_fields_are_tab_separated() -> None:
@@ -68,7 +68,7 @@ def test_format_line_minimal_host() -> None:
 
 
 def test_format_line_never_contains_newlines() -> None:
-    host = Host(alias="n", hostname="n", note="nota con spazi, virgole e — trattini")
+    host = Host(alias="n", hostname="n", note="note with spaces, commas and — dashes")
     line = format_line(host)
     assert "\n" not in line and line.count("\t") == 3
 
@@ -77,8 +77,8 @@ def test_format_line_never_contains_newlines() -> None:
 
 
 def test_fzf_receives_numbered_hosts_in_order_and_returns_choice() -> None:
-    # Ogni riga inizia con un indice nascosto (--with-nth=2..): la scelta si
-    # ricava da quel numero, non da testo che fzf potrebbe stampare diverso.
+    # Each line starts with a hidden index (--with-nth=2..): the choice is
+    # derived from that number, not from text fzf might print differently.
     fake = FakeFzf(stdout="2\t" + format_line(DB) + "\n")
     assert fzf_picker(fake).choose(HOSTS) == DB
     argv, kwargs = fake.calls[0]
@@ -89,8 +89,8 @@ def test_fzf_receives_numbered_hosts_in_order_and_returns_choice() -> None:
 
 
 def test_fzf_ignores_user_default_options(monkeypatch: pytest.MonkeyPatch) -> None:
-    # FZF_DEFAULT_OPTS potrebbe aggiungere --print-query, --expect, ecc. e
-    # cambiare il formato dell'output: lo togliamo dall'ambiente di fzf.
+    # FZF_DEFAULT_OPTS could add --print-query, --expect, etc. and change
+    # the output format: we remove it from fzf's environment.
     monkeypatch.setenv("FZF_DEFAULT_OPTS", "--print-query")
     monkeypatch.setenv("FZF_DEFAULT_OPTS_FILE", "/tmp/x")
     fake = FakeFzf(stdout="1\t" + format_line(WEB01) + "\n")
@@ -110,7 +110,7 @@ def test_fzf_unexpected_output_fails_closed(stdout: str) -> None:
 
 
 def test_relative_fzf_path_is_not_used() -> None:
-    # Un "./fzf" nella directory corrente (PATH con voce vuota o ".") no.
+    # A "./fzf" in the current directory (PATH with an empty entry or ".") is not used.
     console = Console(answers=["1"])
     picker = Picker(which=lambda name: "fzf", runner=FakeFzf(), input=console.input, output=console.output)
     assert picker.choose(HOSTS) == WEB01
@@ -139,7 +139,7 @@ def test_fzf_vanished_falls_back_to_list() -> None:
     assert picker.choose(HOSTS) == DB
 
 
-# --- lista numerata (senza fzf) --------------------------------------------------
+# --- numbered list (without fzf) -------------------------------------------------
 
 
 def test_list_shows_numbered_hosts_and_selects_by_number() -> None:
@@ -155,14 +155,14 @@ def test_list_filter_then_number() -> None:
 
 
 def test_list_exact_alias_selects_it() -> None:
-    console = Console(answers=["LAB"])  # senza distinguere maiuscole
+    console = Console(answers=["LAB"])  # case-insensitive
     assert list_picker(console).choose(HOSTS) == LAB
 
 
 def test_list_single_non_alias_match_still_needs_confirmation() -> None:
-    # Un filtro con un solo risultato NON connette da solo: un refuso
-    # porterebbe su un host qualsiasi (magari con la password).
-    console = Console(answers=["db.example"])  # poi EOF
+    # A filter with a single result does NOT connect on its own: a typo
+    # would take you to some random host (maybe with the password).
+    console = Console(answers=["db.example"])  # then EOF
     assert list_picker(console).choose(HOSTS) is None
     assert list_picker(Console(answers=["db.example", "1"])).choose(HOSTS) == DB
 
@@ -174,7 +174,7 @@ def test_list_filter_matches_hostname_tags_and_note() -> None:
 
 @pytest.mark.parametrize("weird", ["²", "①", "٣", "１", "9" * 5000])
 def test_non_ascii_or_huge_digits_are_filters_not_indexes(weird: str) -> None:
-    # '²'.isdigit() è True ma int('²') solleva: niente crash, è un filtro.
+    # '²'.isdigit() is True but int('²') raises: no crash, it's a filter.
     console = Console(answers=[weird, "2"])
     assert list_picker(console).choose(HOSTS) == DB
 
@@ -182,7 +182,7 @@ def test_non_ascii_or_huge_digits_are_filters_not_indexes(weird: str) -> None:
 def test_list_filter_without_matches_shows_message_and_retries() -> None:
     console = Console(answers=["zzz", "3"])
     assert list_picker(console).choose(HOSTS) == LAB
-    assert any("Nessun host" in p for p in console.printed)
+    assert any("No host" in p for p in console.printed)
 
 
 @pytest.mark.parametrize("bad", ["0", "4", "-1"])

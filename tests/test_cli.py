@@ -69,8 +69,8 @@ class FakePicker:
 @dataclass
 class Env:
     root: Path
-    answers: list[str] = field(default_factory=list)  # input() in chiaro
-    secrets: list[str] = field(default_factory=list)  # getpass: master e password host
+    answers: list[str] = field(default_factory=list)  # input(), in clear
+    secrets: list[str] = field(default_factory=list)  # getpass: master and host passwords
     out: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     connector: FakeConnector = field(default_factory=FakeConnector)
@@ -144,7 +144,7 @@ def _vault_with_password(env: Env, alias: str, password: str) -> None:
     assert env.run("pw", "set", alias) == 0
 
 
-# --- avvio ------------------------------------------------------------------------
+# --- startup ----------------------------------------------------------------------
 
 
 def test_preflight_ok_when_nothing_exists(env: Env) -> None:
@@ -168,7 +168,7 @@ def test_preflight_refuses_permissive_files(env: Env, target: str) -> None:
 def test_main_hardens_process_and_installs_excepthook(env: Env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "excepthook", sys.__excepthook__)
     assert main(["ls"], app=env.app()) == 0
-    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)  # niente core dump con segreti
+    assert resource.getrlimit(resource.RLIMIT_CORE) == (0, 0)  # no core dumps with secrets
     assert sys.excepthook is not sys.__excepthook__
 
 
@@ -188,13 +188,13 @@ def test_add_with_flags(env: Env) -> None:
 
 
 def test_add_interactive(env: Env) -> None:
-    # hostname, user, port, tag, jump, identity, note (invio = vuoto/default)
-    env.answers = ["db.example.com", "postgres", "", "prod db", "", "~/.ssh/id_db", "il database"]
+    # hostname, user, port, tag, jump, identity, note (Enter = empty/default)
+    env.answers = ["db.example.com", "postgres", "", "prod db", "", "~/.ssh/id_db", "the database"]
     assert env.run("add", "db") == 0
     host = env.inventory().get("db")
     assert host == Host(
         alias="db", hostname="db.example.com", user="postgres", tags=("db", "prod"),
-        identity_file="~/.ssh/id_db", note="il database",
+        identity_file="~/.ssh/id_db", note="the database",
     )  # fmt: skip
 
 
@@ -206,7 +206,7 @@ def test_add_dry_run_shows_diff_without_writing(env: Env) -> None:
 
 def test_add_duplicate_is_error(env: Env) -> None:
     _add_web01(env)
-    with pytest.raises(HsmError, match="Esiste già"):
+    with pytest.raises(HsmError, match="already exists"):
         env.run("add", "web01", "--hostname", "x")
 
 
@@ -225,7 +225,7 @@ def test_ls_lists_hosts_with_last_use(env: Env) -> None:
     assert env.run("ls") == 0
     text = env.text()
     assert "web01" in text and "deploy@10.0.0.1" in text and "#prod" in text
-    assert "mai" in text
+    assert "never" in text
 
 
 def test_ls_filters_by_tag(env: Env) -> None:
@@ -275,7 +275,7 @@ def test_edit_with_flags_keeps_other_fields(env: Env) -> None:
 
 
 def test_edit_interactive_keeps_defaults_and_clears_with_dash(env: Env) -> None:
-    _add_web01(env, "--note", "vecchia nota")
+    _add_web01(env, "--note", "old note")
     # alias, hostname, user, port, tag, jump, identity, note
     env.answers = ["", "", "-", "", "", "", "", "-"]
     assert env.run("edit", "web01") == 0
@@ -298,7 +298,7 @@ def test_rm_removes_host_without_touching_vault_for_key_hosts(env: Env) -> None:
     _add_web01(env)
     assert env.run("rm", "web01") == 0
     assert env.inventory().hosts() == []
-    assert env.unlocks == 0  # nessun Touch ID/password per un host a chiave
+    assert env.unlocks == 0  # no Touch ID/password for a key-based host
 
 
 def test_rm_dry_run(env: Env) -> None:
@@ -337,16 +337,16 @@ def test_pw_set_creates_vault_and_marks_host(env: Env) -> None:
 
 def test_pw_set_preserves_comments_in_hosts_file(env: Env) -> None:
     _add_web01(env)
-    text = "# i miei server\n" + env.paths.hosts.read_text()
+    text = "# my servers\n" + env.paths.hosts.read_text()
     atomic_write(env.paths.hosts, text.encode())
     _vault_with_password(env, "web01", "host-pw")
-    assert env.paths.hosts.read_text().startswith("# i miei server\n")
+    assert env.paths.hosts.read_text().startswith("# my servers\n")
 
 
 def test_pw_set_mismatch_is_error(env: Env) -> None:
     _add_web01(env)
     env.secrets = ["one", "two"]
-    with pytest.raises(HsmError, match="non coincidono"):
+    with pytest.raises(HsmError, match="do not match"):
         env.run("pw", "set", "web01")
     assert not env.paths.vault.exists()
 
@@ -354,7 +354,7 @@ def test_pw_set_mismatch_is_error(env: Env) -> None:
 def test_pw_set_empty_is_error(env: Env) -> None:
     _add_web01(env)
     env.secrets = ["", ""]
-    with pytest.raises(HsmError, match="vuota"):
+    with pytest.raises(HsmError, match="empty"):
         env.run("pw", "set", "web01")
 
 
@@ -400,7 +400,7 @@ def test_vault_rekey(env: Env) -> None:
     assert "web01" in vault.load(env.paths.vault, key)
 
 
-# --- connect e selettore ------------------------------------------------------
+# --- connect and picker -------------------------------------------------------
 
 
 def test_connect_key_host_never_unlocks(env: Env) -> None:
@@ -485,10 +485,10 @@ def test_sync_twice_reports_up_to_date(env: Env) -> None:
     env.run("sync")
     env.out.clear()
     env.run("sync")
-    assert "aggiornato" in env.text()
+    assert "up to date" in env.text()
 
 
-# --- rami di errore -------------------------------------------------------------
+# --- error branches -------------------------------------------------------------
 
 
 def test_add_flags_without_hostname_is_error(env: Env) -> None:
@@ -497,7 +497,7 @@ def test_add_flags_without_hostname_is_error(env: Env) -> None:
 
 
 def test_add_interactive_without_terminal(env: Env) -> None:
-    with pytest.raises(HsmError, match="terminale"):
+    with pytest.raises(HsmError, match="terminal"):
         env.run("add", "web01")
 
 
@@ -509,7 +509,7 @@ def test_add_interactive_requires_hostname(env: Env) -> None:
 
 def test_add_interactive_bad_port(env: Env) -> None:
     env.answers = ["h.example.com", "", "abc"]
-    with pytest.raises(HsmError, match="Porta"):
+    with pytest.raises(HsmError, match="port"):
         env.run("add", "web01")
 
 
@@ -525,13 +525,13 @@ def test_pw_rm_missing_entry(env: Env) -> None:
     _add_web01(env)
     _vault_with_password(env, "web01", "host-pw")
     env.secrets = [MASTER]
-    with pytest.raises(HsmError, match="Nessuna password"):
+    with pytest.raises(HsmError, match="No password"):
         env.run("pw", "rm", "lab")
 
 
 def test_pw_set_without_terminal(env: Env) -> None:
     _add_web01(env)
-    with pytest.raises(HsmError, match="terminale"):
+    with pytest.raises(HsmError, match="terminal"):
         env.run("pw", "set", "web01")
 
 
@@ -542,10 +542,14 @@ def test_sync_reports_backup(env: Env) -> None:
     assert "backup" in env.text()
 
 
-def test_confirm_accepts_italian_yes(env: Env) -> None:
+def test_confirm_accepts_yes(env: Env) -> None:
     app = env.app()
-    env.answers = ["sì"]
+    env.answers = ["Y"]
     assert app._confirm("Ok?") is True
+    env.answers = ["yes"]
+    assert app._confirm("Ok?") is True
+    env.answers = ["s"]
+    assert app._confirm("Ok?") is False
     env.answers = ["n"]
     assert app._confirm("Ok?") is False
     assert app._confirm("Ok?") is False  # EOF = no
@@ -558,11 +562,11 @@ def test_default_paths_live_under_home(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert paths.ssh_config == tmp_path / ".ssh" / "config"
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings --------------------------------------------------
 
 
 def _concurrent_add(env: Env, alias: str) -> None:
-    """Un altro `hsm add` che finisce mentre questo comando è in attesa."""
+    """Another `hsm add` that completes while this command is waiting."""
     other = Inventory.load(env.paths.hosts)
     other.add(Host(alias=alias, hostname=f"{alias}.lan"))
     other.save()
@@ -603,8 +607,8 @@ def test_add_interactive_does_not_lose_hosts_added_meanwhile(env: Env) -> None:
 
 
 def test_rm_holds_the_lock_while_waiting_for_the_master_password(env: Env) -> None:
-    # Un altro hsm che volesse scrivere in quel momento deve aspettare,
-    # invece di salvare una versione che rm sovrascriverebbe.
+    # Another hsm wanting to write at that moment must wait, instead of
+    # saving a version that rm would then overwrite.
     from hsm.fsutil import locked
 
     _add_web01(env)
@@ -627,7 +631,7 @@ def test_rm_holds_the_lock_while_waiting_for_the_master_password(env: Env) -> No
 
 
 class KeyTracker:
-    """Avvolge l'Unlocker per conservare le chiavi restituite."""
+    """Wraps the Unlocker to keep the keys it returns."""
 
     def __init__(self, env: Env) -> None:
         self.keys: list[Secret] = []
@@ -655,7 +659,7 @@ def test_connect_wipes_vault_key_before_session_and_password_after(env: Env) -> 
 
     class Inspecting(FakeConnector):
         def connect(self, host: Host, inventory: Inventory, *, password: Secret | None = None) -> int:
-            # Durante la sessione ssh la chiave del vault non serve più.
+            # During the ssh session the vault key is no longer needed.
             with pytest.raises(ValueError):
                 tracker.keys[0].view()
             seen["password"] = password
@@ -665,13 +669,13 @@ def test_connect_wipes_vault_key_before_session_and_password_after(env: Env) -> 
     env.secrets = [MASTER]
     env.run("connect", "web01")
     assert env.connector.calls == [("web01", b"host-pw")]
-    with pytest.raises(ValueError):  # e la password sparisce a sessione finita
+    with pytest.raises(ValueError):  # and the password is gone once the session ends
         seen["password"].view()  # type: ignore[union-attr]
 
 
 @pytest.mark.parametrize("argv", [("pw", "rm", "web01"), ("vault", "rekey"), ("pw", "get", "web01")])
 def test_vault_commands_on_fresh_install_are_clean_errors(env: Env, argv: tuple[str, ...]) -> None:
-    with pytest.raises(HsmError, match="Vault non trovato"):
+    with pytest.raises(HsmError, match="Vault not found"):
         env.run(*argv)
 
 
@@ -683,7 +687,7 @@ def test_pw_set_reports_hosts_file_failure_with_recovery_hint(
 
     def failing(self: Inventory, *, dry_run: bool = False) -> str:
         if not dry_run:
-            raise OSError("disco pieno")
+            raise OSError("disk full")
         return original(self, dry_run=True)
 
     monkeypatch.setattr(Inventory, "save", failing)
@@ -695,10 +699,10 @@ def test_pw_set_reports_hosts_file_failure_with_recovery_hint(
 def test_add_validates_alias_before_asking_anything(env: Env) -> None:
     with pytest.raises(HsmError, match="alias"):
         env.run("add", "bad alias")
-    assert env.answers == []  # nessuna domanda consumata (e nessun EOF)
+    assert env.answers == []  # no prompt consumed (and no EOF)
 
 
-# --- rinomina ---------------------------------------------------------------------
+# --- rename -----------------------------------------------------------------------
 
 
 def test_edit_alias_renames_and_updates_dependents(env: Env) -> None:
@@ -709,7 +713,7 @@ def test_edit_alias_renames_and_updates_dependents(env: Env) -> None:
     inv = env.inventory()
     assert inv.get("gw").hostname == "b.example.com"
     assert inv.get("web01").jump_host == "gw"
-    assert "hsm sync" in env.text()  # il vecchio blocco in ssh_config va rigenerato
+    assert "hsm sync" in env.text()  # the old block in ssh_config must be regenerated
 
 
 def test_edit_alias_together_with_other_flags(env: Env) -> None:
@@ -729,7 +733,7 @@ def test_edit_alias_moves_vault_entry_and_last_use(env: Env) -> None:
     _add_web01(env)
     _vault_with_password(env, "web01", "host-pw")
     env.secrets = [MASTER]
-    env.run("connect", "web01")  # registra l'ultimo uso
+    env.run("connect", "web01")  # records the last use
     env.secrets = [MASTER]
     env.run("edit", "web01", "--alias", "web02")
     assert State.load(env.paths.state).last_used("web02") is not None
@@ -747,7 +751,7 @@ def test_edit_alias_dry_run_changes_nothing(env: Env) -> None:
     assert "+[hosts.web02]" in env.text()
 
 
-# --- add: Hostname/IP e password subito -------------------------------------------
+# --- add: Hostname/IP and password right away -------------------------------------
 
 
 def test_add_accepts_ip_as_synonym_of_hostname(env: Env) -> None:
@@ -766,11 +770,11 @@ def test_add_interactive_label_mentions_ip(env: Env) -> None:
     env._ask = ask  # type: ignore[method-assign]
     env.answers = ["10.0.0.1", "", "", "", "", "", ""]
     env.run("add", "web01")
-    assert prompts[0].startswith("Hostname o IP")
+    assert prompts[0].startswith("Hostname or IP")
 
 
 def test_add_with_password_flag_stores_it_right_away(env: Env) -> None:
-    # password host (due volte), poi master password nuova (due volte)
+    # host password (twice), then new master password (twice)
     env.secrets = ["host-pw", "host-pw", MASTER, MASTER]
     assert env.run("add", "legacy01", "--ip", "10.0.0.9", "--user", "admin", "--password") == 0
     assert env.inventory().get("legacy01").auth == "password"
@@ -780,14 +784,14 @@ def test_add_with_password_flag_stores_it_right_away(env: Env) -> None:
 
 
 def test_add_password_is_never_an_argv_value(env: Env) -> None:
-    # `--password s3cret` finirebbe nella cronologia della shell e in `ps`.
+    # `--password s3cret` would end up in the shell history and in `ps`.
     with pytest.raises(SystemExit):
         build_parser().parse_args(["add", "x", "--ip", "h", "--password", "s3cret"])
 
 
 def test_add_password_mismatch_adds_nothing(env: Env) -> None:
     env.secrets = ["one", "two"]
-    with pytest.raises(HsmError, match="non coincidono"):
+    with pytest.raises(HsmError, match="do not match"):
         env.run("add", "legacy01", "--ip", "10.0.0.9", "--password")
     assert env.inventory().hosts() == []
     assert not env.paths.vault.exists()
@@ -796,7 +800,7 @@ def test_add_password_mismatch_adds_nothing(env: Env) -> None:
 def test_add_password_cancelled_unlock_adds_nothing(env: Env) -> None:
     _add_web01(env)
     _vault_with_password(env, "web01", "host-pw")
-    env.secrets = ["pw2", "pw2"]  # poi EOF alla master password
+    env.secrets = ["pw2", "pw2"]  # then EOF at the master password
     with pytest.raises(HsmError):
         env.run("add", "legacy01", "--ip", "10.0.0.9", "--password")
     with pytest.raises(HsmError):
@@ -804,7 +808,7 @@ def test_add_password_cancelled_unlock_adds_nothing(env: Env) -> None:
 
 
 def test_add_interactive_offers_password(env: Env) -> None:
-    env.answers = ["10.0.0.9", "admin", "", "", "", "", "", "s"]
+    env.answers = ["10.0.0.9", "admin", "", "", "", "", "", "y"]
     env.secrets = ["host-pw", "host-pw", MASTER, MASTER]
     env.run("add", "legacy01")
     assert env.inventory().get("legacy01").auth == "password"
@@ -830,14 +834,14 @@ def test_add_password_dry_run_asks_nothing_and_writes_nothing(env: Env) -> None:
 def _paths_rows(env: Env) -> dict[str, str]:
     env.out.clear()
     assert env.run("paths") == 0
-    # Righe "ETICHETTA  PERCORSO  STATO" (a parte l'intestazione).
+    # Rows "LABEL  PATH  STATUS" (apart from the header).
     return {line.split("  ")[0].strip(): line for line in env.out[1:]}
 
 
 def test_paths_on_fresh_install_creates_nothing(env: Env) -> None:
     rows = _paths_rows(env)
-    for label in ("Configurazione", "Inventario", "Vault", "Stato", "Lock", "SSH config"):
-        assert "non esiste" in rows[label], label
+    for label in ("Config dir", "Inventory", "Vault", "State", "Lock", "SSH config"):
+        assert "missing" in rows[label], label
     assert str(env.paths.vault) in rows["Vault"]
     assert not env.paths.config_dir.exists()
 
@@ -847,31 +851,31 @@ def test_paths_reports_ok_files_and_ssh_block(env: Env) -> None:
     atomic_write(env.paths.ssh_config, b"Host old\n")
     env.run("sync")
     rows = _paths_rows(env)
-    assert "ok" in rows["Inventario"] and "600" in rows["Inventario"]
-    assert "ok" in rows["Configurazione"] and "700" in rows["Configurazione"]
-    assert "blocco hsm presente" in rows["SSH config"]
-    assert "1 file" in rows["Backup SSH config"]
+    assert "ok" in rows["Inventory"] and "600" in rows["Inventory"]
+    assert "ok" in rows["Config dir"] and "700" in rows["Config dir"]
+    assert "hsm block present" in rows["SSH config"]
+    assert "1 file(s)" in rows["Backup SSH config"]
 
 
 def test_paths_shows_permission_problems_instead_of_refusing(env: Env) -> None:
     _add_web01(env)
     env.paths.hosts.chmod(0o644)
-    # Gli altri comandi si rifiutano di partire; paths deve mostrare il problema.
+    # The other commands refuse to start; paths must show the problem.
     assert main(["paths"], app=env.app()) == 0
     rows = {line.split("  ")[0].strip(): line for line in env.out if "  " in line}
-    assert "chmod 600" in rows["Inventario"]
+    assert "chmod 600" in rows["Inventory"]
 
 
 def test_paths_keychain_row(env: Env) -> None:
     rows = _paths_rows(env)
-    assert "nessun vault" in rows["Keychain"]
+    assert "no vault" in rows["Keychain"]
     _add_web01(env)
     _vault_with_password(env, "web01", "host-pw")
     rows = _paths_rows(env)
     kid = vault.key_id(vault.read_header(env.paths.vault))
-    assert kid in rows["Keychain"] and "presente" in rows["Keychain"]
+    assert kid in rows["Keychain"] and "present" in rows["Keychain"]
     env.keychain.items.clear()
-    assert "assente" in _paths_rows(env)["Keychain"]
+    assert "absent" in _paths_rows(env)["Keychain"]
 
 
 def test_paths_lists_programs(env: Env) -> None:

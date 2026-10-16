@@ -51,7 +51,7 @@ def test_touch_truncates_to_seconds_and_normalizes_to_utc(path: Path) -> None:
 
 
 def test_touch_rejects_naive_datetime(path: Path) -> None:
-    # Senza fuso orario non sapremmo confrontare usi fatti in fusi diversi.
+    # Without a timezone we couldn't compare uses made in different timezones.
     with pytest.raises(ValueError):
         State.load(path).touch("web01", datetime(2026, 10, 16, 10, 0, 0))
 
@@ -65,7 +65,7 @@ def test_forget(path: Path) -> None:
     s = State.load(path)
     s.touch("web01", T0)
     s.forget("web01")
-    s.forget("never-seen")  # idempotente
+    s.forget("never-seen")  # idempotent
     assert s.last_used("web01") is None
 
 
@@ -110,18 +110,18 @@ def test_save_creates_private_dir(tmp_path: Path) -> None:
     assert stat.S_IMODE(p.parent.stat().st_mode) == 0o700
 
 
-# --- file non valido ---------------------------------------------------------
+# --- invalid file ------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "text",
     [
-        "[last_used\n",  # TOML rotto
-        'last_used = "x"\n',  # non è una tabella
-        '[last_used]\nweb01 = "ieri"\n',  # non è una data
-        "[last_used]\nweb01 = 2026-10-16T10:00:00\n",  # senza fuso orario
+        "[last_used\n",  # broken TOML
+        'last_used = "x"\n',  # not a table
+        '[last_used]\nweb01 = "yesterday"\n',  # not a date
+        "[last_used]\nweb01 = 2026-10-16T10:00:00\n",  # no timezone
         '[last_used]\n"bad alias" = 2026-10-16T10:00:00Z\n',
-        "[last_used]\nweb01 = 2026-10-16\n",  # solo data
+        "[last_used]\nweb01 = 2026-10-16\n",  # date only
     ],
 )
 def test_invalid_file_is_state_error_naming_the_path(path: Path, text: str) -> None:
@@ -131,7 +131,7 @@ def test_invalid_file_is_state_error_naming_the_path(path: Path, text: str) -> N
 
 
 def test_unknown_top_level_keys_are_ignored(path: Path) -> None:
-    # Spazio per versioni future: chiavi sconosciute non bloccano hsm.
+    # Room for future versions: unknown keys don't block hsm.
     _write(path, "future = 1\n[last_used]\nweb01 = 2026-10-16T10:00:00Z\n")
     assert State.load(path).last_used("web01") == T0
 
@@ -144,14 +144,14 @@ def test_permissive_file_is_refused(path: Path) -> None:
 
 
 def test_alias_with_dot_roundtrips(path: Path) -> None:
-    # In TOML un punto nella chiave separa tabelle: va scritto tra virgolette.
+    # In TOML a dot in a key separates tables: it must be quoted.
     s = State.load(path)
     s.touch("web.prod", T0)
     s.save()
     assert State.load(path).last_used("web.prod") == T0
 
 
-# --- rilievi della review ------------------------------------------------------
+# --- review findings -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -190,7 +190,7 @@ def test_touch_extreme_date_is_value_error(path: Path) -> None:
 
 
 def test_load_or_empty_degrades_with_warning(path: Path) -> None:
-    # Lo stato è un dato di comodo: un file rotto non deve bloccare connect.
+    # The state is convenience data: a broken file must not block connect.
     _write(path, "[last_used\n")
     warnings: list[str] = []
     s = State.load_or_empty(path, warnings.append)
@@ -199,7 +199,7 @@ def test_load_or_empty_degrades_with_warning(path: Path) -> None:
 
 
 def test_load_or_empty_still_refuses_permissive_file(path: Path) -> None:
-    # I permessi restano una condizione dura, come per gli altri file di hsm.
+    # Permissions remain a hard requirement, as for the other hsm files.
     _write(path, "")
     path.chmod(0o644)
     with pytest.raises(InsecurePermissionsError):
@@ -212,6 +212,6 @@ def test_rename_moves_last_use(path: Path) -> None:
     s.rename("web01", "web02")
     assert s.last_used("web01") is None
     assert s.last_used("web02") == T0
-    s.rename("never-seen", "x")  # nessun errore
+    s.rename("never-seen", "x")  # no error
     with pytest.raises(ValueError):
         s.rename("web02", "bad alias")

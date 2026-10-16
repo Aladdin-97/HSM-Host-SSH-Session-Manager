@@ -1,31 +1,31 @@
-"""Selettore di host per `hsm` senza argomenti: fzf se c'è, altrimenti una lista.
+"""Host picker for `hsm` without arguments: fzf if available, otherwise a list.
 
-Restituisce solo l'host scelto (o None): il connect lo fa la CLI.
+Returns only the chosen host (or None): the CLI does the connect.
 
-Con fzf ogni host è una riga separata da tab, preceduta da un indice che
-fzf non mostra (--with-nth=2..):
+With fzf each host is a tab-separated line, preceded by an index that fzf
+does not show (--with-nth=2..):
 
     2   web01   deploy@10.0.0.1:2222   #prod #web   frontend
 
-fzf disegna la sua interfaccia su /dev/tty e legge le righe da stdin;
-scrive su stdout la riga scelta, e da quell'indice ricaviamo l'host. Se
-l'output non è esattamente una riga "<indice>\t...", ci fermiamo: meglio
-un errore che collegarsi all'host sbagliato. Per lo stesso motivo togliamo
-FZF_DEFAULT_OPTS dall'ambiente di fzf: opzioni come --print-query o
---expect cambierebbero il formato dell'output.
-Le righe arrivano nell'ordine ricevuto (di solito: usati di recente prima)
-e `--tiebreak=index` lo conserva a parità di punteggio.
+fzf draws its interface on /dev/tty and reads the lines from stdin; it
+writes the chosen line to stdout, and from that index we get the host. If
+the output is not exactly one "<index>\t..." line, we stop: better an
+error than connecting to the wrong host. For the same reason we remove
+FZF_DEFAULT_OPTS from fzf's environment: options like --print-query or
+--expect would change the output format.
+Lines come in the order received (usually: recently used first) and
+`--tiebreak=index` keeps that order on equal scores.
 
-fzf non riceve segreti, quindi lo cerchiamo nel PATH come qualsiasi
-comando, ma solo se il percorso è assoluto (niente "./fzf"). I campi
-mostrati sono già validati da Host (niente tab, a capo o sequenze di
-escape), quindi non possono alterare il terminale.
+fzf receives no secrets, so we look it up in PATH like any command, but
+only if the path is absolute (no "./fzf"). The fields shown are already
+validated by Host (no tabs, newlines or escape sequences), so they cannot
+tamper with the terminal.
 
-Senza fzf: lista numerata. Si digita un numero per scegliere, oppure un
-testo per filtrare (alias, host, tag, note; senza maiuscole). Il filtro
-sceglie da solo solo se il testo è esattamente un alias: altrimenti anche
-con un solo risultato serve il numero, perché un refuso non porti su un
-host qualsiasi. Invio a vuoto esce.
+Without fzf: a numbered list. Type a number to choose, or some text to
+filter (alias, host, tags, notes; case-insensitive). The filter picks on
+its own only if the text is exactly an alias: otherwise, even with a
+single result, the number is required, so a typo does not take you to
+some random host. Empty Enter quits.
 """
 
 import os
@@ -38,12 +38,12 @@ from typing import Any
 from hsm.errors import HsmError
 from hsm.inventory import DEFAULT_PORT, Host
 
-# Codici d'uscita di fzf: 1 = nessuna corrispondenza, 130 = Esc o Ctrl-C.
+# fzf exit codes: 1 = no match, 130 = Esc or Ctrl-C.
 _FZF_NO_MATCH = 1
 _FZF_INTERRUPTED = 130
 
-# Solo cifre ASCII e non troppe: '²'.isdigit() è True ma int('²') fallisce,
-# e int() rifiuta stringhe di oltre 4300 cifre.
+# ASCII digits only, and not too many: '²'.isdigit() is True but int('²')
+# fails, and int() rejects strings of more than 4300 digits.
 _INDEX_RE = re.compile(r"[0-9]{1,6}")
 _FZF_CHOICE_RE = re.compile(r"([0-9]{1,6})\t[^\r\n]*\n?")
 _FZF_ENV_DROP = ("FZF_DEFAULT_OPTS", "FZF_DEFAULT_OPTS_FILE")
@@ -60,7 +60,7 @@ _FZF_OPTIONS = [
 
 
 def format_line(host: Host) -> str:
-    """alias, [user@]host[:porta], #tag, nota — separati da tab."""
+    """alias, [user@]host[:port], #tags, note — tab-separated."""
     address = f"[{host.hostname}]" if ":" in host.hostname and host.port != DEFAULT_PORT else host.hostname
     target = (f"{host.user}@" if host.user else "") + address
     if host.port != DEFAULT_PORT:
@@ -70,14 +70,14 @@ def format_line(host: Host) -> str:
 
 
 class Picker:
-    """Sceglie un host in modo interattivo. Dipendenze esterne iniettabili."""
+    """Picks a host interactively. External dependencies are injectable."""
 
     def __init__(
         self,
         *,
         which: Callable[[str], str | None] = shutil.which,
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-        input: Callable[[str], str] = input,  # noqa: A002 - stesso nome della builtin di default
+        input: Callable[[str], str] = input,  # noqa: A002 - same name as the default builtin
         output: Callable[[str], None] = print,
     ) -> None:
         self._which = which
@@ -86,15 +86,15 @@ class Picker:
         self._output = output
 
     def choose(self, hosts: Sequence[Host]) -> Host | None:
-        """L'host scelto, o None se l'utente rinuncia."""
+        """The chosen host, or None if the user gives up."""
         if not hosts:
-            raise HsmError("Inventario vuoto: aggiungi un host con hsm add <alias>.")
+            raise HsmError("Inventory is empty: add a host with hsm add <alias>.")
         fzf = self._which("fzf")
         if fzf is not None and os.path.isabs(fzf):
             try:
                 return self._choose_fzf(fzf, hosts)
             except FileNotFoundError:
-                pass  # sparito tra which e l'esecuzione: si usa la lista
+                pass  # gone between which and execution: use the list
         return self._choose_from_list(hosts)
 
     def _choose_fzf(self, fzf: str, hosts: Sequence[Host]) -> Host | None:
@@ -109,11 +109,11 @@ class Picker:
         if result.returncode in (_FZF_NO_MATCH, _FZF_INTERRUPTED):
             return None
         if result.returncode != 0:
-            raise HsmError(f"fzf è terminato con errore (codice {result.returncode}).")
+            raise HsmError(f"fzf exited with an error (code {result.returncode}).")
         match = _FZF_CHOICE_RE.fullmatch(result.stdout)
         index = int(match.group(1)) if match else 0
         if not 1 <= index <= len(hosts):
-            raise HsmError("fzf ha restituito una scelta in un formato inatteso: non mi collego.")
+            raise HsmError("fzf returned a choice in an unexpected format: not connecting.")
         return hosts[index - 1]
 
     def _choose_from_list(self, hosts: Sequence[Host]) -> Host | None:
@@ -121,7 +121,7 @@ class Picker:
         while True:
             self._show(current)
             try:
-                answer = self._input("Numero o filtro (invio per uscire): ").strip()
+                answer = self._input("Number or filter (Enter to quit): ").strip()
             except EOFError:
                 return None
             if not answer:
@@ -130,14 +130,14 @@ class Picker:
                 index = int(answer)
                 if 1 <= index <= len(current):
                     return current[index - 1]
-                self._output(f"Numero fuori intervallo (1-{len(current)}).")
+                self._output(f"Number out of range (1-{len(current)}).")
                 continue
             needle = answer.casefold()
-            # Il filtro parte sempre dall'elenco completo: un secondo filtro
-            # sostituisce il primo invece di restringerlo ancora.
+            # The filter always starts from the full list: a second filter
+            # replaces the first instead of narrowing it further.
             matches = [h for h in hosts if needle in format_line(h).casefold()]
             if not matches:
-                self._output(f"Nessun host corrisponde a {answer!r}.")
+                self._output(f"No host matches {answer!r}.")
                 continue
             exact = [h for h in matches if h.alias.casefold() == needle]
             if exact:

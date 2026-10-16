@@ -16,8 +16,8 @@ def _mode(path: Path) -> int:
 
 @pytest.fixture
 def open_umask() -> Iterator[None]:
-    # umask 0 è il caso peggiore: se il codice si affidasse all'umask,
-    # i file uscirebbero 0666.
+    # umask 0 is the worst case: if the code relied on the umask,
+    # files would come out 0666.
     old = os.umask(0)
     yield
     os.umask(old)
@@ -46,10 +46,10 @@ def test_atomic_write_leaves_no_temp_files(tmp_path: Path) -> None:
 
 def test_atomic_write_cleans_up_on_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(src: str, dst: str) -> None:
-        raise OSError("disco pieno")
+        raise OSError("disk full")
 
     monkeypatch.setattr(os, "replace", boom)
-    with pytest.raises(OSError, match="disco pieno"):
+    with pytest.raises(OSError, match="disk full"):
         atomic_write(tmp_path / "f", b"data")
     assert list(tmp_path.iterdir()) == []
 
@@ -82,7 +82,7 @@ def test_read_private_rejects_foreign_owner(tmp_path: Path, monkeypatch: pytest.
     target = tmp_path / "f"
     atomic_write(target, b"data")
     monkeypatch.setattr(os, "getuid", lambda: os.stat(target).st_uid + 1)
-    with pytest.raises(InsecurePermissionsError, match="proprietario"):
+    with pytest.raises(InsecurePermissionsError, match="owner"):
         read_private(target)
 
 
@@ -131,7 +131,7 @@ def test_ensure_private_dir_rejects_existing_permissive_dir(tmp_path: Path) -> N
         ensure_private_dir(d)
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings ------------------------------------------------
 
 
 def test_read_private_rejects_permissive_parent_dir(tmp_path: Path) -> None:
@@ -155,14 +155,14 @@ def test_atomic_write_rejects_permissive_parent_dir(tmp_path: Path) -> None:
 def test_read_private_rejects_fifo_without_blocking(tmp_path: Path) -> None:
     fifo = tmp_path / "fifo"
     os.mkfifo(fifo, 0o600)
-    with pytest.raises(InsecurePermissionsError, match="file regolare"):
+    with pytest.raises(InsecurePermissionsError, match="regular file"):
         read_private(fifo)
 
 
 def test_read_private_rejects_oversized_file(tmp_path: Path) -> None:
     target = tmp_path / "f"
     atomic_write(target, b"12345")
-    with pytest.raises(HsmError, match="grande"):
+    with pytest.raises(HsmError, match="too large"):
         read_private(target, max_size=4)
 
 
@@ -187,7 +187,7 @@ def test_falls_back_to_fsync_when_full_fsync_unsupported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def unsupported(fd: int, cmd: int) -> None:
-        raise OSError("F_FULLFSYNC non supportato")
+        raise OSError("F_FULLFSYNC not supported")
 
     monkeypatch.setattr(fcntl, "fcntl", unsupported)
     atomic_write(tmp_path / "f", b"data")
@@ -206,7 +206,7 @@ def test_locked_creates_private_lockfile_and_excludes_others(tmp_path: Path) -> 
     lock = tmp_path / "vault.lock"
     with locked(lock):
         assert stat.S_IMODE(lock.stat().st_mode) == 0o600
-        # Un altro processo non riesce a prendere il lock (LOCK_NB).
+        # Another process cannot acquire the lock (LOCK_NB).
         probe = subprocess.run(
             [sys.executable, "-c",
              "import fcntl,os,sys; fd=os.open(sys.argv[1], os.O_RDWR);"
@@ -214,7 +214,7 @@ def test_locked_creates_private_lockfile_and_excludes_others(tmp_path: Path) -> 
             capture_output=True,
         )  # fmt: skip
         assert probe.returncode != 0
-    # Rilasciato all'uscita dal blocco.
+    # Released on leaving the block.
     probe = subprocess.run(
         [sys.executable, "-c",
          "import fcntl,os,sys; fd=os.open(sys.argv[1], os.O_RDWR);"
@@ -238,9 +238,9 @@ def test_locked_times_out_with_clear_message(tmp_path: Path) -> None:
     from hsm.fsutil import locked
 
     lock = tmp_path / "vault.lock"
-    # flock vale per descriptor: un secondo open nello stesso processo
-    # trova il lock occupato, come lo troverebbe un altro hsm.
+    # flock is per descriptor: a second open in the same process finds
+    # the lock taken, just as another hsm would.
     with locked(lock):
-        with pytest.raises(HsmError, match="altro hsm"):
+        with pytest.raises(HsmError, match="Another hsm"):
             with locked(lock, timeout=0.2):
                 pass

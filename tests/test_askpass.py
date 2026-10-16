@@ -31,14 +31,14 @@ def server(password: bytes = b"s3cret") -> AskpassServer:
     return AskpassServer(Secret(password), user=USER, hostname=HOST)
 
 
-# --- riconoscimento del prompt ----------------------------------------------------
+# --- prompt recognition ------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "prompt",
     [
-        "admin@10.0.0.9's password: ",  # autenticazione "password"
-        "(admin@10.0.0.9) Password: ",  # keyboard-interactive (OpenSSH recenti)
+        "admin@10.0.0.9's password: ",  # "password" authentication
+        "(admin@10.0.0.9) Password: ",  # keyboard-interactive (recent OpenSSH)
         "(admin@10.0.0.9) Password:",
     ],
 )
@@ -49,13 +49,13 @@ def test_recognizes_target_password_prompt(prompt: str) -> None:
 @pytest.mark.parametrize(
     "prompt",
     [
-        HOSTKEY_PROMPT,  # la conferma della chiave host: MAI risposta automatica
-        "jump@bastion.example.com's password: ",  # un altro host (es. il bastion)
-        "root@10.0.0.9's password: ",  # un altro utente
+        HOSTKEY_PROMPT,  # host key confirmation: NEVER answered automatically
+        "jump@bastion.example.com's password: ",  # another host (e.g. the bastion)
+        "root@10.0.0.9's password: ",  # another user
         "admin@10.0.0.99's password: ",
         "Enter passphrase for key '/Users/me/.ssh/id': ",
         "(admin@10.0.0.9) Verification code: ",  # OTP
-        "evil text admin@10.0.0.9's password: ",  # prefisso: niente match parziali
+        "evil text admin@10.0.0.9's password: ",  # prefix: no partial matches
         "admin@10.0.0.9's password: \nAre you sure (yes/no)? ",
     ],
 )
@@ -67,7 +67,7 @@ def test_rejects_every_other_prompt(prompt: str) -> None:
 
 
 def _ask(env: dict[str, str], prompt: str) -> tuple[int, bytes]:
-    """Lancia l'helper vero (main) come farebbe ssh, catturando stdout."""
+    """Runs the real helper (main) as ssh would, capturing stdout."""
     out = io.BytesIO()
     code = main(["hsm-askpass", prompt], env=env, stdout=out, relay=lambda p: None)
     return code, out.getvalue()
@@ -97,8 +97,8 @@ def test_answers_target_prompt_once() -> None:
         srv.expect_ssh(os.getppid())
         env = srv.env("x")
         assert _ask(env, TARGET_PROMPT) == (0, b"s3cret\n")
-        # Una seconda richiesta vuol dire password rifiutata: niente nuovo
-        # invio automatico, la parola passa all'utente.
+        # A second request means the password was rejected: no new
+        # automatic send, the user takes over.
         code, out = _ask(env, TARGET_PROMPT)
         assert out == b""
         assert srv.rejected == 1
@@ -122,7 +122,7 @@ def test_wrong_token_gets_nothing() -> None:
         env = {**srv.env("x"), ENV_TOKEN: "0" * 64}
         code, out = _ask(env, TARGET_PROMPT)
         assert code != 0 and out == b""
-        # Il tentativo fallito non consuma la risposta per il token giusto.
+        # The failed attempt does not consume the answer for the right token.
         assert _ask(srv.env("x"), TARGET_PROMPT) == (0, b"s3cret\n")
 
 
@@ -139,7 +139,7 @@ def test_password_with_newline_is_rejected() -> None:
         AskpassServer(Secret(b"a\nb"), user=USER, hostname=HOST)
 
 
-# --- helper: relay verso il terminale ---------------------------------------------
+# --- helper: relay to the terminal ------------------------------------------------
 
 
 def test_relay_answer_goes_to_stdout() -> None:
@@ -151,7 +151,7 @@ def test_relay_answer_goes_to_stdout() -> None:
 
 
 def test_relay_without_terminal_fails_closed() -> None:
-    # Nessun terminale: la conferma della chiave host vale "no".
+    # No terminal: the host key confirmation counts as "no".
     out = io.BytesIO()
     with server() as srv:
         srv.expect_ssh(os.getppid())
@@ -165,14 +165,14 @@ def test_without_hsm_env_behaves_like_plain_askpass() -> None:
     assert out.getvalue() == b"typed\n"
 
 
-# --- integrazione: l'eseguibile vero ----------------------------------------------
+# --- integration: the real executable ---------------------------------------------
 
 
 def test_installed_helper_executable_answers() -> None:
     helper = Path(sys.executable).parent / "hsm-askpass"
-    assert helper.exists(), "manca la console script hsm-askpass: lancia `uv sync`"
+    assert helper.exists(), "hsm-askpass console script missing: run `uv sync`"
     with server(b"real-pw") as srv:
-        srv.expect_ssh(os.getpid())  # il padre dell'helper è questo processo
+        srv.expect_ssh(os.getpid())  # the helper's parent is this process
         result = subprocess.run(
             [str(helper), TARGET_PROMPT],
             env={**os.environ, **srv.env(str(helper))},
@@ -186,7 +186,7 @@ def test_installed_helper_executable_answers() -> None:
 
 @pytest.mark.skipif(
     os.environ.get("HSM_SSHD_TESTS") != "1",
-    reason="avvia un sshd temporaneo su 127.0.0.1: abilita con HSM_SSHD_TESTS=1",
+    reason="starts a temporary sshd on 127.0.0.1: enable with HSM_SSHD_TESTS=1",
 )
 def test_with_real_ssh_and_sshd(tmp_path: Path) -> None:
     import getpass
@@ -217,7 +217,7 @@ def test_with_real_ssh_and_sshd(tmp_path: Path) -> None:
             "-o", "NumberOfPasswordPrompts=1", "--", "127.0.0.1", "true",
         ]  # fmt: skip
 
-        # 1. Chiave host sconosciuta, nessun terminale: l'helper NON conferma.
+        # 1. Unknown host key, no terminal: the helper does NOT confirm.
         with AskpassServer(Secret(b"pw"), user=user, hostname="127.0.0.1") as srv:
             proc = subprocess.Popen(base, env={**os.environ, **srv.env(str(helper))},
                                     stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # fmt: skip
@@ -225,7 +225,7 @@ def test_with_real_ssh_and_sshd(tmp_path: Path) -> None:
             assert proc.wait(timeout=20) != 0
         assert not known.exists() or known.read_text() == ""
 
-        # 2. Chiave host già nota: la password arriva al server da sola.
+        # 2. Host key already known: the password reaches the server on its own.
         keyscan = subprocess.run(["ssh-keyscan", "-p", str(port), "127.0.0.1"], capture_output=True, text=True)
         known.write_text(keyscan.stdout)
         with AskpassServer(Secret(b"pw-from-vault"), user=user, hostname="127.0.0.1") as srv:
@@ -234,15 +234,15 @@ def test_with_real_ssh_and_sshd(tmp_path: Path) -> None:
             srv.expect_ssh(proc.pid)
             proc.wait(timeout=20)
         time.sleep(0.3)
-        # Un sshd non-root non può verificare password: "Failed password"
-        # dimostra che la password è arrivata fino al server.
+        # A non-root sshd cannot verify passwords: "Failed password"
+        # proves the password made it all the way to the server.
         assert "Failed password" in log.read_text()
     finally:
         sshd.terminate()
         sshd.wait(timeout=5)
 
 
-# --- relay verso /dev/tty (simulato) ----------------------------------------------
+# --- relay to /dev/tty (simulated) ------------------------------------------------
 
 
 class FakeTty(io.StringIO):
@@ -261,7 +261,7 @@ def test_relay_yes_no_reads_visible_line(monkeypatch: pytest.MonkeyPatch) -> Non
     tty = FakeTty("yes\n")
     monkeypatch.setattr(askpass, "open", lambda *a, **k: tty, raising=False)
     assert askpass._relay_to_tty(HOSTKEY_PROMPT) == "yes"
-    assert tty.shown == [HOSTKEY_PROMPT]  # la domanda completa arriva a te
+    assert tty.shown == [HOSTKEY_PROMPT]  # the full question reaches you
 
 
 def test_relay_secret_prompt_uses_getpass(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -281,7 +281,7 @@ def test_relay_without_tty_or_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(askpass, "open", no_tty, raising=False)
     assert askpass._relay_to_tty("x") is None
     monkeypatch.setattr(askpass, "open", lambda *a, **k: FakeTty(""), raising=False)
-    assert askpass._relay_to_tty(HOSTKEY_PROMPT) is None  # EOF sulla conferma
+    assert askpass._relay_to_tty(HOSTKEY_PROMPT) is None  # EOF on the confirmation
 
     def eof(prompt: str) -> str:
         raise EOFError
@@ -308,7 +308,7 @@ def test_bind_failure_leaves_nothing_behind(monkeypatch: pytest.MonkeyPatch) -> 
         return path
 
     def failing_bind(self: socket_mod.socket, address: object) -> None:
-        raise OSError("bind fallita")
+        raise OSError("bind failed")
 
     monkeypatch.setattr(tempfile, "mkdtemp", tracking_mkdtemp)
     monkeypatch.setattr(socket_mod.socket, "bind", failing_bind)
@@ -326,20 +326,20 @@ def test_helper_that_disconnects_does_not_break_the_server() -> None:
         srv.expect_ssh(os.getppid())
         env = srv.env("x")
         with socket_mod.socket(socket_mod.AF_UNIX) as s:
-            s.connect(env[ENV_SOCKET])  # si connette e se ne va senza dire nulla
+            s.connect(env[ENV_SOCKET])  # connects and leaves without saying anything
         assert _ask(env, TARGET_PROMPT) == (0, b"s3cret\n")
 
 
-# --- rilievi della security review ----------------------------------------------
+# --- security review findings ----------------------------------------------------
 
 
 def test_only_helpers_of_the_main_ssh_get_the_password() -> None:
-    # Con -J, ssh lancia un ssh figlio per il bastion: anche lui usa l'helper.
-    # Se il bastion avesse lo stesso user@host della destinazione (altra
-    # porta), il suo prompt combacerebbe: il pid del padre lo esclude.
+    # With -J, ssh spawns a child ssh for the bastion: it uses the helper too.
+    # If the bastion had the same user@host as the destination (another
+    # port), its prompt would match: the parent pid rules it out.
     relayed: list[str] = []
     with server() as srv:
-        srv.expect_ssh(1)  # un altro processo, non il nostro padre
+        srv.expect_ssh(1)  # another process, not our parent
         out = io.BytesIO()
         main(["hsm-askpass", TARGET_PROMPT], env=srv.env("x"), stdout=out, relay=lambda p: relayed.append(p) or None)
     assert out.getvalue() == b""
@@ -379,8 +379,8 @@ def test_host_key_question_is_recognized_strictly() -> None:
         "ED25519 key fingerprint is: SHA256:x\nThis key is not known by any other names.\n"
         "Are you sure you want to continue connecting (yes/no/[fingerprint])? "
     )
-    # Testo keyboard-interactive scelto dal server: ssh lo prefissa con
-    # "(user@host) ", quindi non può spacciarsi per la domanda di ssh.
+    # Keyboard-interactive text chosen by the server: ssh prefixes it with
+    # "(user@host) ", so it cannot pass itself off as ssh's question.
     assert not is_host_key_question("(evil@h) OTP (yes/no) Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
 
 
@@ -389,7 +389,7 @@ def test_server_text_with_yes_no_does_not_echo(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(askpass, "open", lambda *a, **k: FakeTty(""), raising=False)
     monkeypatch.setattr(askpass.getpass, "getpass", lambda prompt: "hidden")
-    # Un server che include "(yes/no" non deve poter far vedere un OTP sullo schermo.
+    # A server that includes "(yes/no" must not be able to make an OTP visible on screen.
     assert askpass._relay_to_tty("(u@h) Code (yes/no): ") == "hidden"
 
 
@@ -412,7 +412,7 @@ def test_failed_delivery_does_not_consume_the_answer(monkeypatch: pytest.MonkeyP
     def flaky(self: AskpassServer, conn: object) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
-            raise OSError("helper sparito")
+            raise OSError("helper gone")
         original(self, conn)  # type: ignore[arg-type]
 
     monkeypatch.setattr(askpass.AskpassServer, "_deliver", flaky)

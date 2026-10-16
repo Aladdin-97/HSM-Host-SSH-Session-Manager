@@ -1,88 +1,88 @@
-Costruiamo insieme un CLI Python per gestire un inventario di host SSH.
-Non scrivere ancora codice: prima leggi tutto e dimmi le assunzioni che fai.
+Let's build together a Python CLI to manage an inventory of SSH hosts.
+Don't write any code yet: first read everything and tell me the assumptions you make.
 
-OBIETTIVO
-Un tool da riga di comando che sostituisca l'albero sessioni di MobaXterm:
-salva macchine, le organizza con tag, le cerca, salva le password cifrate,
-e lancia la connessione usando l'ssh nativo del sistema.
+GOAL
+A command-line tool that replaces MobaXterm's session tree:
+it saves machines, organizes them with tags, searches them, stores encrypted
+passwords, and launches the connection using the system's native ssh.
 
-CONTESTO
-- macOS (Apple Silicon), Python 3.12, uso personale su decine di host
-- Utente: infrastructure engineer, conosce Python ma vuole CAPIRE il codice,
-  non solo eseguirlo. Spiega le scelte non ovvie con commenti brevi.
-- Motore di connessione: /usr/bin/ssh nativo. Non implementare SSH in Python,
-  non usare paramiko.
+CONTEXT
+- macOS (Apple Silicon), Python 3.12, personal use on dozens of hosts
+- User: infrastructure engineer, knows Python but wants to UNDERSTAND the code,
+  not just run it. Explain non-obvious choices with short comments.
+- Connection engine: native /usr/bin/ssh. Do not implement SSH in Python,
+  do not use paramiko.
 
-MODELLO DATI
-- Inventario in ~/.config/hsm/hosts.toml (leggibile e versionabile, SENZA segreti)
-- Campi host: alias, hostname, user, port, tag[], jump_host, identity_file, note
-- Il vault dei segreti è un file separato e cifrato: ~/.config/hsm/vault.enc
+DATA MODEL
+- Inventory in ~/.config/hsm/hosts.toml (readable and versionable, WITHOUT secrets)
+- Host fields: alias, hostname, user, port, tag[], jump_host, identity_file, note
+- The secrets vault is a separate, encrypted file: ~/.config/hsm/vault.enc
 
-SICUREZZA (la parte che conta — leggi con attenzione)
-- Vault cifrato con AES-256-GCM. Chiave derivata dalla master password con
-  Argon2id (parametri espliciti e commentati, non default della libreria).
-- La master password NON viene chiesta a ogni comando: dopo il primo unlock
-  viene memorizzata nel Keychain macOS come item protetto da biometria, così
-  gli unlock successivi passano da Touch ID. Usa il comando `security` o
-  una libreria equivalente; spiega nel codice cosa stai facendo e perché.
-- Se il Keychain non è disponibile, fallback al prompt della master password.
-  Mai fallire in modo silenzioso verso "nessuna cifratura".
-- Nonce casuale per ogni cifratura, mai riusato. Salt generato una volta e
-  salvato in chiaro nell'header del vault.
-- La password in chiaro deve vivere il meno possibile in memoria: niente log,
-  niente stacktrace che la contengano, niente repr degli oggetti che la
-  tengono.
-- Permessi 0600 su vault e config. Verificali all'avvio e rifiuta di partire
-  se sono più permissivi.
+SECURITY (the part that matters — read carefully)
+- Vault encrypted with AES-256-GCM. Key derived from the master password with
+  Argon2id (explicit, commented parameters, not the library defaults).
+- The master password is NOT asked for on every command: after the first unlock
+  it is stored in the macOS Keychain as a biometry-protected item, so
+  later unlocks go through Touch ID. Use the `security` command or
+  an equivalent library; explain in the code what you are doing and why.
+- If the Keychain is not available, fall back to the master password prompt.
+  Never fail silently towards "no encryption".
+- Random nonce for every encryption, never reused. Salt generated once and
+  stored in clear in the vault header.
+- The plaintext password must live in memory as briefly as possible: no logs,
+  no stack traces containing it, no repr of the objects that
+  hold it.
+- 0600 permissions on vault and config. Check them at startup and refuse to
+  start if they are more permissive.
 
-COMANDI
-  hsm add <alias>      aggiunge un host (flag o prompt interattivo)
-  hsm ls [--tag X]     lista, ordinabile per alias/tag/ultimo uso
+COMMANDS
+  hsm add <alias>      adds a host (flags or interactive prompt)
+  hsm ls [--tag X]     list, sortable by alias/tag/last use
   hsm rm <alias>
   hsm edit <alias>
-  hsm connect <alias>  apre la sessione ssh
-  hsm                  senza argomenti: selettore fuzzy, invio = connect
-  hsm pw set <alias>   salva la password nel vault
-  hsm pw get <alias>   copia in clipboard con auto-clear dopo 30s
-  hsm sync             rigenera un blocco delimitato in ~/.ssh/config
+  hsm connect <alias>  opens the ssh session
+  hsm                  without arguments: fuzzy picker, enter = connect
+  hsm pw set <alias>   stores the password in the vault
+  hsm pw get <alias>   copies to the clipboard with auto-clear after 30s
+  hsm sync             regenerates a delimited block in ~/.ssh/config
 
-CONNESSIONE
-- Default: chiave SSH. La password è il caso secondario, non il primo.
-- Con password: usa sshpass passandola via file descriptor o fifo con
-  permessi 0600, MAI come argomento di command line (visibile in ps) e
-  mai in una variabile d'ambiente esportata.
-- Se sshpass non è installato, dillo e offri il fallback "copia in clipboard
-  e connetti", senza fallire.
-- Supporta ProxyJump dal campo jump_host.
+CONNECTION
+- Default: SSH key. The password is the secondary case, not the first.
+- With a password: use sshpass, passing it via a file descriptor or a fifo with
+  0600 permissions, NEVER as a command-line argument (visible in ps) and
+  never in an exported environment variable.
+- If sshpass is not installed, say so and offer the "copy to clipboard
+  and connect" fallback, without failing.
+- Support ProxyJump from the jump_host field.
 
-SYNC VERSO SSH_CONFIG
-- Scrive solo tra marker "# >>> hsm begin" / "# <<< hsm end"
-- Non tocca una riga fuori da quel blocco
-- Fa un backup prima di scrivere
-- Idempotente: due sync di fila producono lo stesso file
+SYNC TO SSH_CONFIG
+- Writes only between the markers "# >>> hsm begin" / "# <<< hsm end"
+- Does not touch a single line outside that block
+- Makes a backup before writing
+- Idempotent: two syncs in a row produce the same file
 
-NON FUNZIONALI
-- Dipendenze minime: typer (o argparse), cryptography, argon2-cffi, tomlkit.
-  Giustifica ogni dipendenza aggiunta oltre queste.
-- Type hints ovunque, docstring sulle funzioni pubbliche
-- Errori con messaggi utili all'utente, non stacktrace nudi
-- --dry-run su add/rm/edit/sync
-- Nessuna chiamata di rete fuori da ssh
+NON-FUNCTIONAL
+- Minimal dependencies: typer (or argparse), cryptography, argon2-cffi, tomlkit.
+  Justify every dependency added beyond these.
+- Type hints everywhere, docstrings on public functions
+- Errors with messages useful to the user, not bare stack traces
+- --dry-run on add/rm/edit/sync
+- No network calls outside ssh
 
-VINCOLI
-- Non reimplementare crittografia a mano: usa `cryptography`, non costruzioni
-  artigianali con hashlib.
-- Non scrivere mai la password in chiaro su disco, nemmeno temporaneamente.
-- Non silenziare eccezioni con except generici.
-- Non aggiungere una GUI, un TUI o un web server.
+CONSTRAINTS
+- Do not reimplement cryptography by hand: use `cryptography`, not homemade
+  constructions with hashlib.
+- Never write the plaintext password to disk, not even temporarily.
+- Do not silence exceptions with generic excepts.
+- Do not add a GUI, a TUI or a web server.
 
 OUTPUT
-1. Prima: assunzioni, domande aperte e lo schema del vault (header + payload).
-2. Poi, su mio ok: struttura dei moduli, poi il codice un modulo alla volta,
-   partendo da vault.py (la parte critica), così posso leggerlo prima di
-   proseguire.
-3. Per ogni scelta crittografica, due righe di spiegazione del PERCHÉ.
-4. Chiudi con una sezione "Limiti noti e modello di minaccia": da cosa questo
-   tool protegge e da cosa NON protegge.
+1. First: assumptions, open questions and the vault schema (header + payload).
+2. Then, on my ok: the module structure, then the code one module at a time,
+   starting from vault.py (the critical part), so I can read it before
+   moving on.
+3. For every cryptographic choice, two lines explaining WHY.
+4. Close with a "Known limits and threat model" section: what this
+   tool protects against and what it does NOT protect against.
 
-Non generare tutto in un colpo. Procedi a moduli e fermati tra uno e l'altro.
+Don't generate everything in one go. Proceed module by module and stop between one and the next.

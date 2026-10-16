@@ -8,22 +8,22 @@ from hsm.errors import HsmError, VaultAuthError, make_excepthook
 def _raise_and_capture(exc: BaseException) -> tuple[type[BaseException], BaseException, object]:
     try:
         raise exc
-    except BaseException:  # noqa: BLE001 - serve solo a catturare exc_info nel test
+    except BaseException:  # noqa: BLE001 - only to capture exc_info in the test
         return sys.exc_info()  # type: ignore[return-value]
 
 
 def test_hsm_error_prints_only_the_user_message(capsys: pytest.CaptureFixture[str]) -> None:
     hook = make_excepthook(debug=False)
-    hook(*_raise_and_capture(VaultAuthError("master password errata")))
+    hook(*_raise_and_capture(VaultAuthError("wrong master password")))
     err = capsys.readouterr().err
-    assert err == "hsm: master password errata\n"
+    assert err == "hsm: wrong master password\n"
 
 
 def test_unexpected_error_hides_message_and_traceback(capsys: pytest.CaptureFixture[str]) -> None:
-    # Il messaggio di un'eccezione inattesa potrebbe contenere dati sensibili:
-    # senza --debug mostriamo solo il tipo.
+    # The message of an unexpected exception could contain sensitive data:
+    # without --debug we show only the type.
     hook = make_excepthook(debug=False)
-    hook(*_raise_and_capture(ValueError("contiene hunter2")))
+    hook(*_raise_and_capture(ValueError("contains hunter2")))
     err = capsys.readouterr().err
     assert "hunter2" not in err
     assert "Traceback" not in err
@@ -33,10 +33,10 @@ def test_unexpected_error_hides_message_and_traceback(capsys: pytest.CaptureFixt
 
 def test_debug_prints_traceback(capsys: pytest.CaptureFixture[str]) -> None:
     hook = make_excepthook(debug=True)
-    hook(*_raise_and_capture(ValueError("dettaglio")))
+    hook(*_raise_and_capture(ValueError("detail")))
     err = capsys.readouterr().err
     assert "Traceback" in err
-    assert "dettaglio" in err
+    assert "detail" in err
 
 
 def test_keyboard_interrupt_is_quiet(capsys: pytest.CaptureFixture[str]) -> None:

@@ -1,318 +1,312 @@
-# hsm — Limiti noti e modello di minaccia
+# hsm — Known limits and threat model
 
-Questo documento dice **da cosa hsm ti protegge e da cosa no**. Vale per la
-versione su `feat/core-modules` (ottobre 2026), macOS su Apple Silicon, uso
-personale da parte di un solo utente.
+This document says **what hsm protects you from and what it does not**. It
+applies to the version on `feat/core-modules` (October 2026), macOS on Apple
+Silicon, personal use by a single user.
 
-In una frase: hsm protegge bene le password **a riposo** (il file del vault
-copiato, rubato, finito in un backup) e non lascia segreti in posti ovvi
-(argomenti dei processi, variabili d'ambiente, log, file temporanei). **Non**
-protegge da chi esegue codice come il tuo utente sul Mac sbloccato.
+In one sentence: hsm protects passwords well **at rest** (the vault file
+copied, stolen, left in a backup) and does not leave secrets in obvious
+places (process arguments, environment variables, logs, temporary files).
+It does **not** protect against someone running code as your user on the
+unlocked Mac.
 
 ---
 
-## Cosa c'è da proteggere
+## What needs protecting
 
-| Bene | Dove vive | Sensibilità |
+| Asset | Where it lives | Sensitivity |
 |---|---|---|
-| Password degli host | `~/.config/hsm/vault.enc`, cifrate | Alta |
-| Chiave del vault (32 byte, derivata dalla master password) | login keychain, item `hsm` | Alta: apre il vault senza master password |
-| Master password | solo nella tua testa; in memoria per un attimo durante l'unlock | Alta |
-| Inventario (hostname, utenti, bastion, tag, note) | `~/.config/hsm/hosts.toml`, in chiaro | Media: è una mappa della tua infrastruttura |
-| Ultimo uso degli host | `~/.config/hsm/state.toml`, in chiaro | Bassa: dice cosa usi e quando |
-| Blocco generato | `~/.ssh/config` tra i marker, più i backup `config.hsm-backup-*` | Media, come l'inventario |
+| Host passwords | `~/.config/hsm/vault.enc`, encrypted | High |
+| Vault key (32 bytes, derived from the master password) | login keychain, item `hsm` | High: opens the vault without the master password |
+| Master password | only in your head; in memory for a moment during unlock | High |
+| Inventory (hostnames, users, bastions, tags, notes) | `~/.config/hsm/hosts.toml`, in clear | Medium: it is a map of your infrastructure |
+| Hosts' last use | `~/.config/hsm/state.toml`, in clear | Low: tells what you use and when |
+| Generated block | `~/.ssh/config` between the markers, plus the `config.hsm-backup-*` backups | Medium, like the inventory |
 
 ---
 
-## Chi può attaccare, e cosa ottiene
+## Who can attack, and what they get
 
-### ✅ Chi ottiene una copia di `vault.enc`
+### ✅ Someone who gets a copy of `vault.enc`
 
-È il caso per cui hsm è progettato: un backup su Time Machine o in cloud, un
-disco smarrito, un repository di dotfile pubblicato per errore.
+This is the case hsm is designed for: a Time Machine or cloud backup, a lost
+disk, a dotfiles repository published by mistake.
 
-- **Il vault è cifrato con AES-256-GCM.** Senza la chiave non si legge
-  nulla, nemmeno quali alias hanno una password: si cifra l'intero payload.
-- **La chiave viene da Argon2id** con 256 MiB di memoria, 3 passate e 4
-  lane. Ogni tentativo di indovinare la master password costa 256 MiB di
-  RAM e circa 0,15 s su un Apple Silicon. Le GPU, che hanno tanta potenza
-  di calcolo ma poca memoria per core, non danno un grande vantaggio.
-- **Manomissioni:** il tag GCM autentica anche l'header. Un file alterato,
-  compresi i parametri di Argon2 portati più in basso, viene rifiutato, mai
-  decifrato male.
-- **Limite:** la protezione vale quanto la master password. Il minimo è 12
-  caratteri, ma una password corta o riusata altrove si indovina comunque.
+- **The vault is encrypted with AES-256-GCM.** Without the key nothing can
+  be read, not even which aliases have a password: the whole payload is
+  encrypted.
+- **The key comes from Argon2id** with 256 MiB of memory, 3 passes and 4
+  lanes. Each attempt to guess the master password costs 256 MiB of RAM and
+  about 0.15 s on Apple Silicon. GPUs, which have lots of compute but little
+  memory per core, do not gain much.
+- **Tampering:** the GCM tag also authenticates the header. An altered file,
+  including Argon2 parameters lowered, is rejected, never decrypted wrongly.
+- **Limit:** the protection is only as good as the master password. The
+  minimum is 12 characters, but a short password or one reused elsewhere
+  can still be guessed.
 
-### ✅ Altri utenti dello stesso Mac (non amministratori)
+### ✅ Other users on the same Mac (non-administrators)
 
-- I file e le directory di hsm sono 0600 e 0700, appartengono a te e non
-  possono essere symlink. All'avvio hsm controlla tutto questo e **si
-  rifiuta di partire** se qualcosa non torna. I controlli sono fatti sul
-  file già aperto (`fstat`), così il file non può essere scambiato tra il
-  controllo e la lettura.
-- **La password di un host non compare mai negli argomenti dei processi**
-  (visibili a tutti con `ps`) **né in una variabile d'ambiente.** ssh la
-  ottiene da `hsm-askpass`, che la riceve da hsm su un socket Unix in una
-  directory 0700 creata per quel connect, con un token casuale. Un altro
-  utente non può nemmeno vedere il socket.
-- **La chiave del vault viene passata a `security` su stdin** (`security
-  -i`), mai come argomento.
-- **Il processo che svuota gli appunti riceve solo un contatore e una
-  scadenza:** niente password e niente hash da attaccare offline.
+- hsm's files and directories are 0600 and 0700, belong to you and cannot
+  be symlinks. At startup hsm checks all of this and **refuses to start**
+  if something is off. The checks are made on the already opened file
+  (`fstat`), so the file cannot be swapped between the check and the read.
+- **A host's password never appears in process arguments** (visible to
+  everyone with `ps`) **or in an environment variable.** ssh gets it from
+  `hsm-askpass`, which receives it from hsm over a Unix socket in a 0700
+  directory created for that connect, with a random token. Another user
+  cannot even see the socket.
+- **The vault key is passed to `security` on stdin** (`security -i`), never
+  as an argument.
+- **The process that clears the clipboard receives only a counter and a
+  deadline:** no password and no hash to attack offline.
 
-### ✅ Un `hosts.toml` scritto male o manipolato
+### ✅ A badly written or tampered `hosts.toml`
 
-Per esempio un file condiviso in un repository di team, o modificato da uno
-script.
+For example a file shared in a team repository, or modified by a script.
 
-- **Ogni campo viene analizzato, non solo filtrato:** IP con `ipaddress`,
-  nomi DNS etichetta per etichetta, jump host scomposto in
-  `[user@]host[:port]`. Un hostname come `-oProxyCommand=…` (che ssh
-  eseguirebbe come comando) viene rifiutato. In più c'è sempre `--` prima
-  della destinazione.
-- **Nessun valore può aggiungere righe a `~/.ssh/config`.** A capo,
-  virgolette, `#`, `\`, `$` e `%` non espanso vengono rifiutati, con un
-  secondo controllo al momento della scrittura. Un valore sbagliato
-  romperebbe l'intero file, per tutti gli host.
-- **`jump_host = "none"` è vietato:** farebbe saltare il bastion in silenzio.
-- **Alias:** unici senza distinguere maiuscole, e mai uguali all'hostname
-  di un altro host. `Host 10.0.0.1` dirotterebbe chi digita `ssh 10.0.0.1`.
-- **Limite:** hsm controlla la *forma* dei valori, non la *fiducia*. Se il
-  file dice che `prod-db` è `attacker.example.com`, hsm ti collega lì, e con
-  `auth = "password"` manda lì la password. Un `hosts.toml` condiviso va
-  trattato come codice: va letto prima di usarlo.
+- **Every field is parsed, not just filtered:** IPs with `ipaddress`, DNS
+  names label by label, jump host split into `[user@]host[:port]`. A
+  hostname like `-oProxyCommand=…` (which ssh would run as a command) is
+  rejected. On top of that there is always `--` before the destination.
+- **No value can add lines to `~/.ssh/config`.** Newlines, quotes, `#`,
+  `\`, `$` and unexpanded `%` are rejected, with a second check at write
+  time. A bad value would break the whole file, for every host.
+- **`jump_host = "none"` is forbidden:** it would silently skip the bastion.
+- **Aliases:** unique case-insensitively, and never equal to another host's
+  hostname. `Host 10.0.0.1` would hijack anyone typing `ssh 10.0.0.1`.
+- **Limit:** hsm checks the *shape* of values, not *trust*. If the file
+  says `prod-db` is `attacker.example.com`, hsm connects you there, and with
+  `auth = "password"` sends the password there. A shared `hosts.toml` must
+  be treated like code: read it before using it.
 
-### ✅ Un server o un bastion malevolo che prova a farsi dare la password
+### ✅ A malicious server or bastion trying to get the password
 
-Il caso: ti colleghi a `legacy01` passando da un bastion, e il bastion (o un
-server finto) prova a ottenere la password di `legacy01`, oppure a farsi
-accettare senza che tu ne verifichi la chiave.
+The case: you connect to `legacy01` through a bastion, and the bastion (or a
+fake server) tries to obtain `legacy01`'s password, or to get itself
+accepted without you checking its key.
 
-- **La password va solo alla domanda esatta dell'host di destinazione**,
-  `utente@host's password: ` o la variante keyboard-interactive, e solo una
-  volta.
-- **Un server non può imitare quella domanda.** Il testo keyboard-interactive
-  lo sceglie il server, ma ssh lo prefissa sempre con `(utente@host)` dell'host
-  a cui sta parlando davvero. La domanda di un bastion non può quindi
-  presentarsi come quella della destinazione.
-- **Il ssh del jump host non riceve la password**, nemmeno se il bastion ha
-  lo stesso `utente@host` della destinazione su un'altra porta (una NAT, un
-  bastion sulla stessa macchina). hsm la consegna solo a un helper figlio
-  del processo ssh principale, e il pid lo verifica il kernel
-  (`LOCAL_PEERPID`), non lo dichiara l'helper. Verificato con due sshd veri
-  sulla stessa macchina.
-- **La conferma di una chiave host sconosciuta non riceve mai una risposta
-  automatica.** Con `SSH_ASKPASS_REQUIRE=force` anche quella domanda passa
-  dall'helper: un "yes" automatico accetterebbe un server qualsiasi
-  (verificato con un helper di prova, che l'ha fatto). hsm la gira a te.
-- **Il testo delle domande viene ripulito** dai caratteri di controllo prima
-  di arrivare al terminale, e la risposta si vede mentre la scrivi solo per
-  la vera domanda di ssh sulla chiave host: un server non può far comparire
-  sullo schermo un OTP digitato.
+- **The password goes only to the exact question of the destination host**,
+  `user@host's password: ` or the keyboard-interactive variant, and only
+  once.
+- **A server cannot imitate that question.** The keyboard-interactive text
+  is chosen by the server, but ssh always prefixes it with `(user@host)` of
+  the host it is really talking to. A bastion's question therefore cannot
+  pass itself off as the destination's.
+- **The jump host's ssh does not receive the password**, not even if the
+  bastion has the same `user@host` as the destination on another port (a
+  NAT, a bastion on the same machine). hsm hands it only to a helper that is
+  a child of the main ssh process, and the pid is verified by the kernel
+  (`LOCAL_PEERPID`), not claimed by the helper. Verified with two real sshd
+  on the same machine.
+- **Confirming an unknown host key never gets an automatic answer.** With
+  `SSH_ASKPASS_REQUIRE=force` that question also goes through the helper:
+  an automatic "yes" would accept any server (verified with a test helper,
+  which did exactly that). hsm passes it to you.
+- **The question text is cleaned** of control characters before reaching
+  the terminal, and the answer is visible while you type it only for ssh's
+  real host key question: a server cannot make a typed OTP show up on
+  screen.
 
-### ⚠️ Qualcuno con il tuo Mac sbloccato tra le mani
+### ⚠️ Someone with your unlocked Mac in their hands
 
-- `hsm connect` e `hsm pw get` chiedono il Touch ID, e il cambio della
-  master password richiede la vecchia password digitata. Questo ferma chi
-  trova il portatile aperto e lancia `hsm`.
-- **Ma il Touch ID è un controllo d'interfaccia, non un vincolo
-  crittografico.** La policy accetta anche la password di macOS. Soprattutto,
-  chi è seduto al tuo Mac sbloccato può aprire un terminale e leggere
-  l'item del Keychain direttamente:
+- `hsm connect` and `hsm pw get` ask for Touch ID, and changing the master
+  password requires typing the old one. This stops someone who finds the
+  laptop open and runs `hsm`.
+- **But Touch ID is an interface check, not a cryptographic constraint.**
+  The policy also accepts the macOS password. Above all, whoever sits at
+  your unlocked Mac can open a terminal and read the Keychain item directly:
   `security find-generic-password -s hsm -w`.
-  Un vincolo biometrico vero richiederebbe un binario firmato con
-  entitlement Apple (opzione (b) scartata in fase di piano).
+  A true biometric constraint would require a binary signed with Apple
+  entitlements (option (b), discarded during planning).
 
-### ❌ Codice malevolo che gira come il tuo utente
+### ❌ Malicious code running as your user
 
-Per esempio un malware, una dipendenza npm o pip compromessa, o un'estensione
-dell'editor.
+For example malware, a compromised npm or pip dependency, or an editor
+extension.
 
-**hsm non protegge da questo.** Un processo con il tuo utente può:
+**hsm does not protect against this.** A process running as your user can:
 
-- leggere la chiave del vault dal Keychain senza nessun prompt, e con quella
-  decifrare il vault;
-- leggere gli appunti nei 30 secondi in cui contengono una password;
-- registrare quello che digiti, master password compresa;
-- sostituire i file del virtualenv o del sorgente di hsm, che sono
-  scrivibili dal tuo utente e quindi hanno lo stesso livello di fiducia di
-  hsm stesso;
-- modificare `hosts.toml`, perché i permessi 0600 non fermano il
-  proprietario;
-- durante un `hsm connect`, leggere token e percorso del socket
-  dall'ambiente di ssh e chiedere la password al posto dell'helper.
+- read the vault key from the Keychain without any prompt, and decrypt the
+  vault with it;
+- read the clipboard during the 30 seconds it holds a password;
+- record what you type, master password included;
+- replace the files of hsm's virtualenv or source, which are writable by
+  your user and therefore have the same trust level as hsm itself;
+- modify `hosts.toml`, because 0600 permissions do not stop the owner;
+- during an `hsm connect`, read the socket token and path from ssh's
+  environment and ask for the password in place of the helper.
 
-Un caso particolare dello stesso confine: i comandi che il tuo
-`~/.ssh/config` fa lanciare a ssh (`ProxyCommand`, `LocalCommand`,
-`Match exec`) sono figli di ssh come l'helper, ereditano token e socket, e
-potrebbero ottenere la password. Sono comandi che hai configurato tu: se ne
-includi da file che non controlli (un `Include` condiviso), trattali come
-codice con accesso alle tue password.
+A special case of the same boundary: the commands your `~/.ssh/config`
+makes ssh run (`ProxyCommand`, `LocalCommand`, `Match exec`) are children
+of ssh just like the helper, inherit token and socket, and could obtain the
+password. They are commands you configured: if you include them from files
+you do not control (a shared `Include`), treat them as code with access to
+your passwords.
 
-È la stessa situazione di un `~/.ssh/id_ed25519` senza passphrase: sul tuo
-utente compromesso nessuno strumento in user space resiste.
+It is the same situation as a `~/.ssh/id_ed25519` without a passphrase: on
+your compromised user account no user-space tool holds up.
 
-### ❌ root / amministratore, o il Mac compromesso a livello di sistema
+### ❌ root / administrator, or the Mac compromised at system level
 
-Fuori portata: può leggere la memoria di qualsiasi processo, il Keychain
-sbloccato, tutto.
+Out of scope: it can read the memory of any process, the unlocked Keychain,
+everything.
 
-### ❌ Il server a cui ti colleghi con password
+### ❌ The server you connect to with a password
 
-Con l'autenticazione a password la password **arriva al server**: è come
-funziona quel metodo. Un server compromesso, o uno falso con una chiave host
-accettata per errore, la riceve. Usa le chiavi SSH ogni volta che puoi:
-in hsm sono il default, e la password è il caso secondario.
+With password authentication the password **reaches the server**: that is
+how the method works. A compromised server, or a fake one with a host key
+accepted by mistake, receives it. Use SSH keys whenever you can: in hsm
+they are the default, and the password is the secondary case.
 
 ---
 
-## Limiti noti, componente per componente
+## Known limits, component by component
 
-### Memoria
+### Memory
 
-- **Python non garantisce di poter azzerare la memoria.** `Secret` tiene i
-  segreti in un `bytearray` che viene azzerato, ma ogni `str` o `bytes`
-  creato lungo la strada è immutabile e resta in memoria finché il garbage
-  collector non lo libera. Succede con l'output di `getpass`, con il testo
-  decifrato del vault, con l'output di `security` e con l'NSString degli
-  appunti. È una mitigazione, non una garanzia.
-- **Mitigazioni attive:**
-  - i core dump sono disattivati (`RLIMIT_CORE = 0`);
-  - i traceback non mostrano mai le variabili locali (argparse al posto di
-    typer per questo motivo);
-  - `repr` e `str` dei segreti sono redatti;
-  - durante una sessione ssh restano in memoria solo la password necessaria
-    e nient'altro del vault.
-- macOS cifra lo swap, quindi le pagine scritte su disco non sono in chiaro.
+- **Python does not guarantee that memory can be wiped.** `Secret` holds
+  secrets in a `bytearray` that gets wiped, but every `str` or `bytes`
+  created along the way is immutable and stays in memory until the garbage
+  collector frees it. This happens with the output of `getpass`, the
+  decrypted vault text, the output of `security` and the clipboard
+  NSString. It is a mitigation, not a guarantee.
+- **Active mitigations:**
+  - core dumps are disabled (`RLIMIT_CORE = 0`);
+  - tracebacks never show local variables (argparse instead of typer for
+    this reason);
+  - `repr` and `str` of secrets are redacted;
+  - during an ssh session only the needed password stays in memory, and
+    nothing else from the vault.
+- macOS encrypts swap, so pages written to disk are not in clear.
 
-### Keychain e Touch ID
+### Keychain and Touch ID
 
-- Nel Keychain sta la **chiave derivata**, non la master password. Chi la
-  ruba apre questo vault, ma non scopre una password che potresti riusare
-  altrove.
-- Conseguenza: **finché l'item esiste nel Keychain, il vault si apre anche
-  senza la master password.** Utile se la dimentichi, pericoloso se il
-  Keychain è esposto.
-- Dopo `hsm vault rekey` il salt cambia: l'item vecchio viene cancellato e
-  la chiave vecchia non apre più il file nuovo.
+- The Keychain holds the **derived key**, not the master password. Whoever
+  steals it opens this vault, but does not learn a password you might reuse
+  elsewhere.
+- Consequence: **as long as the item exists in the Keychain, the vault
+  opens even without the master password.** Useful if you forget it,
+  dangerous if the Keychain is exposed.
+- After `hsm vault rekey` the salt changes: the old item is deleted and the
+  old key no longer opens the new file.
 
-### Vault e backup
+### Vault and backups
 
-- **`hsm vault rekey` non cambia i vault vecchi nei backup.** Una copia su
-  Time Machine di prima del rekey si apre ancora con la vecchia master
-  password. Se cambi la master password perché pensi sia compromessa,
-  considera compromesse anche quelle copie.
-- **Nessun recupero:** senza master password e senza item nel Keychain, il
-  vault è perso. È voluto.
-- Le scritture sono atomiche e forzate su disco (`F_FULLFSYNC`): un crash
-  lascia il vault vecchio o quello nuovo, mai uno a metà.
-- Il lock (`flock`) protegge solo da altri processi hsm. Un editor che
-  modifica `hosts.toml` mentre hsm lavora può ancora perdere una modifica
-  (la sync di `~/.ssh/config` invece se ne accorge e si ferma).
+- **`hsm vault rekey` does not change old vaults in backups.** A Time
+  Machine copy from before the rekey still opens with the old master
+  password. If you change the master password because you think it is
+  compromised, consider those copies compromised too.
+- **No recovery:** without the master password and without the Keychain
+  item, the vault is lost. This is intended.
+- Writes are atomic and forced to disk (`F_FULLFSYNC`): a crash leaves the
+  old vault or the new one, never a half-written one.
+- The lock (`flock`) only protects against other hsm processes. An editor
+  modifying `hosts.toml` while hsm is working can still lose a change (the
+  sync of `~/.ssh/config`, on the other hand, notices and stops).
 
-### Connessione con password (SSH_ASKPASS)
+### Password connection (SSH_ASKPASS)
 
-- **Niente programmi esterni.** ssh chiede la password a `hsm-askpass`, che
-  sta accanto all'interprete Python di hsm e non viene cercato nel `PATH`:
-  un helper finto nel `PATH` non riceverebbe nulla. Richiede OpenSSH ≥ 8.4
-  (`SSH_ASKPASS_REQUIRE`).
-- **Il socket esiste solo durante il connect** e viene rimosso alla fine,
-  anche con SIGTERM o SIGHUP (finestra del terminale chiusa). Con un
-  `kill -9` resta una directory vuota in `$TMPDIR` con un socket morto:
-  nessun segreto su disco.
-- **Una consegna sola.** Se il server rifiuta la password, ssh la chiede di
-  nuovo e la domanda passa a te. Alla fine hsm ti dice di aggiornarla.
-- **Corrispondenza fragile, ma che fallisce in modo sicuro.** Se il tuo
-  `~/.ssh/config` cambia `HostName` o `User`, hsm prova a seguirli con
-  `ssh -G`; se il prompt non combacia comunque (canonicalizzazione dei nomi,
-  server con prompt insoliti), la password non viene consegnata e la
-  digiti tu.
-- **La password del bastion non è automatica:** se il jump host la chiede,
-  la digiti tu. Il vault contiene la password della destinazione.
-- **Durante la sessione** in memoria resta solo la password necessaria:
-  chiave del vault e altre voci sono già azzerate. L'helper vive solo il
-  tempo di rispondere.
-- **`ssh <alias>` da un terminale normale** (dopo `hsm sync`) non usa hsm:
-  lì la password la digiti tu. La consegna automatica c'è solo con
-  `hsm connect`.
+- **No external programs.** ssh asks `hsm-askpass` for the password; the
+  helper sits next to hsm's Python interpreter and is not looked up in the
+  `PATH`: a fake helper in the `PATH` would receive nothing. Requires
+  OpenSSH ≥ 8.4 (`SSH_ASKPASS_REQUIRE`).
+- **The socket exists only during the connect** and is removed at the end,
+  even with SIGTERM or SIGHUP (terminal window closed). With a `kill -9` an
+  empty directory with a dead socket is left in `$TMPDIR`: no secrets on
+  disk.
+- **A single delivery.** If the server rejects the password, ssh asks
+  again and the question goes to you. At the end hsm tells you to update it.
+- **Fragile matching, but it fails safe.** If your `~/.ssh/config` changes
+  `HostName` or `User`, hsm tries to follow them with `ssh -G`; if the
+  prompt still does not match (name canonicalization, servers with unusual
+  prompts), the password is not handed over and you type it yourself.
+- **The bastion's password is not automatic:** if the jump host asks for
+  it, you type it. The vault holds the destination's password.
+- **During the session** only the needed password stays in memory: the
+  vault key and other entries are already wiped. The helper lives only as
+  long as it takes to answer.
+- **`ssh <alias>` from a normal terminal** (after `hsm sync`) does not use
+  hsm: there you type the password yourself. Automatic delivery exists only
+  with `hsm connect`.
 
-### Appunti (`hsm pw get`)
+### Clipboard (`hsm pw get`)
 
-- Servono solo per copiare una password a mano: `hsm connect` non li usa
-  più.
-- Per 30 secondi **qualsiasi app** può leggere la password dagli appunti.
-- I tipi `Concealed` e `Transient` chiedono ai gestori di cronologia (Maccy,
-  Raycast, Paste…) di non salvarla. Un gestore che li ignora la salva
-  comunque.
-- **Appunti universali (Handoff):** macOS può sincronizzare gli appunti con
-  i tuoi altri dispositivi Apple vicini. Non ho verificato se rispetta il
-  tipo `Transient`. Se ti preoccupa, disattiva Handoff oppure non usare
-  `pw get` con altri dispositivi vicini.
-- Se il processo che svuota gli appunti viene ucciso, la password resta
-  negli appunti fino al logout. La scadenza è su orologio reale, quindi
-  regge lo stop del Mac.
+- It is only for copying a password by hand: `hsm connect` no longer uses
+  it.
+- For 30 seconds **any app** can read the password from the clipboard.
+- The `Concealed` and `Transient` types ask clipboard history managers
+  (Maccy, Raycast, Paste…) not to save it. A manager that ignores them
+  saves it anyway.
+- **Universal Clipboard (Handoff):** macOS can sync the clipboard with your
+  other nearby Apple devices. I have not verified whether it honors the
+  `Transient` type. If this worries you, turn off Handoff or do not use
+  `pw get` with other devices nearby.
+- If the process that clears the clipboard is killed, the password stays in
+  the clipboard until logout. The deadline is on wall-clock time, so it
+  survives the Mac sleeping.
 
-### File in chiaro
+### Plaintext files
 
-- **`hosts.toml`, il blocco in `~/.ssh/config` e i suoi backup sono una
-  mappa della tua infrastruttura:** hostname interni, utenti, bastion, note.
-  Non contengono segreti, ma in un repository pubblico sono materiale da
-  ricognizione per un attaccante.
-- **git non conserva i permessi 0600.** Dopo un clone, hsm si rifiuta di
-  partire finché non lanci il `chmod` che ti indica.
-- **I backup di `~/.ssh/config` si accumulano**, uno per ogni sync che
-  cambia qualcosa. Sono 0600, ma vanno ripuliti a mano.
-- **`hsm sync` rifiuta un `~/.ssh/config` symlink** (comune con i dotfile) o
-  con permessi 0644.
+- **`hosts.toml`, the block in `~/.ssh/config` and its backups are a map of
+  your infrastructure:** internal hostnames, users, bastions, notes. They
+  contain no secrets, but in a public repository they are reconnaissance
+  material for an attacker.
+- **git does not preserve 0600 permissions.** After a clone, hsm refuses to
+  start until you run the `chmod` it tells you.
+- **`~/.ssh/config` backups pile up**, one for every sync that changes
+  something. They are 0600, but must be cleaned up by hand.
+- **`hsm sync` rejects a `~/.ssh/config` that is a symlink** (common with
+  dotfiles) or has 0644 permissions.
 
-### Rete
+### Network
 
-- hsm non fa chiamate di rete: l'unico traffico è quello di `/usr/bin/ssh`,
-  che lanci tu.
-
----
-
-## Cosa conviene fare
-
-1. **Master password lunga e unica**, possibilmente una passphrase di più
-   parole. È l'unica difesa del vault copiato.
-2. **FileVault attivo:** protegge Keychain, swap e file di hsm a Mac spento.
-3. **Chiavi SSH ovunque possibile.** `auth = "password"` solo per gli host
-   che non ti lasciano scelta.
-4. **Blocca lo schermo** quando ti allontani: il Touch ID di hsm non basta.
-5. **Leggi gli `hosts.toml` che non hai scritto tu** prima di usarli.
-6. **Dopo un rekey "di emergenza"**, considera compromessi i vault vecchi
-   nei backup, e cambia le password degli host che contenevano.
+- hsm makes no network calls: the only traffic is that of `/usr/bin/ssh`,
+  which you launch.
 
 ---
 
-## Verificato e non verificato
+## Recommendations
 
-**Verificato con test automatici (oltre 600, copertura 98%):**
-- cifratura e manomissioni del vault, permessi e symlink;
-- Keychain reale (roundtrip con un item di test);
-- configurazione risolta da `ssh -G` (OpenSSH 10.3);
-- helper `hsm-askpass` installato, lanciato come lo lancia ssh;
-- avvio reale del watchdog degli appunti;
-- comando `hsm` reale in una HOME temporanea.
+1. **A long, unique master password**, ideally a multi-word passphrase. It
+   is the only defense of a copied vault.
+2. **FileVault on:** it protects the Keychain, swap and hsm's files while
+   the Mac is off.
+3. **SSH keys wherever possible.** `auth = "password"` only for hosts that
+   leave you no choice.
+4. **Lock the screen** when you step away: hsm's Touch ID is not enough.
+5. **Read any `hosts.toml` you did not write** before using it.
+6. **After an "emergency" rekey**, consider old vaults in backups
+   compromised, and change the passwords of the hosts they contained.
 
-**Verificato con il vero ssh e `sshd` temporanei su 127.0.0.1**
+---
+
+## Verified and not verified
+
+**Verified with automated tests (over 600, 98% coverage):**
+- vault encryption and tampering, permissions and symlinks;
+- real Keychain (roundtrip with a test item);
+- configuration resolved by `ssh -G` (OpenSSH 10.3);
+- installed `hsm-askpass` helper, launched the way ssh launches it;
+- real start of the clipboard watchdog;
+- real `hsm` command in a temporary HOME.
+
+**Verified with the real ssh and temporary `sshd` on 127.0.0.1**
 (`HSM_SSHD_TESTS=1`):
-- la password del vault arriva al server di destinazione senza intervento;
-- una chiave host sconosciuta non viene accettata;
-- un jump host con lo stesso `utente@host` della destinazione non riceve la
-  password (prova manuale con due sshd).
+- the vault password reaches the destination server without intervention;
+- an unknown host key is not accepted;
+- a jump host with the same `user@host` as the destination does not receive
+  the password (manual test with two sshd).
 
-Un sshd lanciato come utente normale non può verificare le password, quindi
-questi test arrivano fino al "password ricevuta dal server", non a un login
-riuscito.
+An sshd started as a normal user cannot verify passwords, so these tests go
+as far as "password received by the server", not a successful login.
 
-**Non verificato in automatico, da provare a mano:**
-- prompt Touch ID reale (provato da te durante lo sviluppo di `touchid.py`);
-- scrittura e cancellazione degli appunti reali:
+**Not verified automatically, to be tried by hand:**
+- real Touch ID prompt (tried by you while developing `touchid.py`);
+- writing and clearing the real clipboard:
   `HSM_CLIPBOARD_TESTS=1 .venv/bin/pytest tests/test_clipboard.py -k real_pasteboard`;
-- `hsm add --password` e `hsm connect` verso un host vero, fino al login
-  riuscito, anche con un bastion;
-- server con autenticazione keyboard-interactive (PAM), dove il formato
-  della domanda viene dalla documentazione di OpenSSH e non da una prova;
-- comportamento degli appunti universali con il tipo `Transient`.
+- `hsm add --password` and `hsm connect` to a real host, up to a successful
+  login, including through a bastion;
+- servers with keyboard-interactive (PAM) authentication, where the
+  question format comes from the OpenSSH documentation and not from a test;
+- Universal Clipboard behavior with the `Transient` type.

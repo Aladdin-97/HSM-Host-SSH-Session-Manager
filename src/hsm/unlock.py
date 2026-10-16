@@ -1,19 +1,19 @@
-"""Ottiene la chiave del vault: Touch ID + Keychain, altrimenti master password.
+"""Obtains the vault key: Touch ID + Keychain, otherwise the master password.
 
-Flusso di `get_vault_key`:
+Flow of `get_vault_key`:
 
-    Touch ID ──GRANTED──► chiave dal Keychain ──apre il vault?──sì──► fatto
+    Touch ID ──GRANTED──► key from Keychain ──opens the vault?──yes──► done
        │                         │                    │
-    DENIED / UNAVAILABLE      assente / errore        no: item vecchio, lo cancello
+    DENIED / UNAVAILABLE      missing / error         no: stale item, delete it
        │                         │                    │
-       └─────────────────────────┴────────────────────┴──► prompt master password
-                                                            (max 3 tentativi)
-                                                            └─► salvo la chiave nel Keychain
+       └─────────────────────────┴────────────────────┴──► master password prompt
+                                                            (max 3 attempts)
+                                                            └─► store the key in the Keychain
 
-Garanzie:
-- restituisce solo una chiave che ha appena aperto il vault, oppure solleva;
-- non esiste un percorso "senza cifratura": se tutto fallisce, errore;
-- un problema del Keychain non blocca mai l'uso con la master password.
+Guarantees:
+- it returns only a key that has just opened the vault, or it raises;
+- there is no "unencrypted" path: if everything fails, it's an error;
+- a Keychain problem never blocks use with the master password.
 """
 
 import getpass
@@ -30,10 +30,10 @@ from hsm.touchid import Presence
 from hsm.vault import DEFAULT_KDF, KdfParams, VaultHeader
 
 MAX_ATTEMPTS = 3
-# In caratteri, non in byte (4 emoji sono 16 byte). Con Argon2 a 256 MiB
-# 12 caratteri casuali sono fuori portata; una password corta no.
+# In characters, not bytes (4 emoji are 16 bytes). With Argon2 at 256 MiB
+# 12 random characters are out of reach; a short password is not.
 MIN_PASSWORD_LENGTH = 12
-REASON = "sbloccare il vault di hsm"
+REASON = "unlock the hsm vault"
 
 Prompt = Callable[[str], str]
 Warn = Callable[[str], None]
@@ -41,10 +41,10 @@ PresenceCheck = Callable[[str], Presence]
 
 
 def _char_count(secret: Secret) -> int:
-    """Conta i caratteri UTF-8 senza decodificare (niente copia in str).
+    """Count UTF-8 characters without decoding (no copy into a str).
 
-    In UTF-8 ogni carattere ha esattamente un byte iniziale; i byte di
-    continuazione hanno la forma 10xxxxxx e non vanno contati.
+    In UTF-8 every character has exactly one leading byte; continuation
+    bytes have the form 10xxxxxx and must not be counted.
     """
     return sum(1 for b in secret.view() if b & 0xC0 != 0x80)
 
@@ -54,10 +54,10 @@ def _warn_stderr(message: str) -> None:
 
 
 class Unlocker:
-    """Gestisce il ciclo di vita della chiave del vault per un file dato.
+    """Manages the lifecycle of the vault key for a given file.
 
-    Le dipendenze esterne (Keychain, Touch ID, prompt, avvisi) sono
-    iniettabili: i default sono quelli reali, i test passano dei finti.
+    External dependencies (Keychain, Touch ID, prompt, warnings) are
+    injectable: the defaults are the real ones, tests pass fakes.
     """
 
     def __init__(
@@ -78,8 +78,8 @@ class Unlocker:
         self._params = params
 
     def get_vault_key(self) -> Secret:
-        """Restituisce la chiave del vault, verificata."""
-        # Prima l'header: se il vault non esiste è inutile chiedere il Touch ID.
+        """Return the vault key, verified."""
+        # Header first: if the vault doesn't exist there's no point asking for Touch ID.
         header = vault.read_header(self._path)
         kid = vault.key_id(header)
         cached = self._cached_key(kid)
@@ -90,28 +90,28 @@ class Unlocker:
         return key
 
     def init_vault(self) -> Secret:
-        """Crea il vault chiedendo una nuova master password (due volte)."""
+        """Create the vault by asking for a new master password (twice)."""
         if os.path.lexists(self._path):
-            raise VaultError(f"Esiste già un vault in {self._path}.")
+            raise VaultError(f"A vault already exists at {self._path}.")
         with self._ask_new_password() as password:
             key = vault.create(self._path, password, self._params)
         self._remember(vault.key_id(vault.read_header(self._path)), key)
         return key
 
     def change_master_password(self) -> Secret:
-        """Cambia la master password e ruota l'item nel Keychain.
+        """Change the master password and rotate the Keychain item.
 
-        La vecchia password va digitata: il Touch ID non basta. Chi trova il
-        Mac sbloccato non deve poter cambiare la password e chiudere fuori
-        il proprietario.
+        The old password must be typed: Touch ID is not enough. Someone who
+        finds the Mac unlocked must not be able to change the password and
+        lock the owner out.
         """
         header = vault.read_header(self._path)
         old_kid = vault.key_id(header)
         with self._ask_existing_password(header) as old_key:
             with self._ask_new_password() as new_password:
                 new_key = vault.rekey(self._path, old_key, new_password, self._params)
-        # Prima salviamo la chiave nuova, poi togliamo la vecchia (che non
-        # apre più nulla): se il processo muore in mezzo, l'item giusto c'è.
+        # First we store the new key, then remove the old one (which no longer
+        # opens anything): if the process dies in between, the right item is there.
         self._remember(vault.key_id(vault.read_header(self._path)), new_key)
         self._forget(old_kid)
         return new_key
@@ -121,24 +121,24 @@ class Unlocker:
     def _cached_key(self, kid: str) -> Secret | None:
         presence = self._presence(REASON)
         if presence is Presence.DENIED:
-            self._warn("Touch ID annullato: inserisci la master password.")
+            self._warn("Touch ID cancelled: enter the master password.")
             return None
         if presence is Presence.UNAVAILABLE:
-            self._warn("Touch ID non disponibile: inserisci la master password.")
+            self._warn("Touch ID unavailable: enter the master password.")
             return None
         try:
             key = self._keychain.load_key(kid)
         except KeychainError as exc:
-            self._warn(f"Keychain non utilizzabile ({exc}): inserisci la master password.")
+            self._warn(f"Keychain not usable ({exc}): enter the master password.")
             return None
         if key is None:
             return None
         try:
-            # Verifica: una chiave che non apre il vault non va restituita.
+            # Verify: a key that doesn't open the vault must not be returned.
             vault.verify(self._path, key)
         except VaultAuthError:
             key.wipe()
-            self._warn("La chiave nel Keychain non apre il vault: la rimuovo.")
+            self._warn("The key in the Keychain doesn't open the vault: removing it.")
             self._forget(kid)
             return None
         except VaultError:
@@ -151,15 +151,15 @@ class Unlocker:
             self._keychain.store_key(kid, key)
         except KeychainError as exc:
             self._warn(
-                f"Impossibile salvare la chiave nel Keychain ({exc}): "
-                "la prossima volta servirà di nuovo la master password."
+                f"Unable to store the key in the Keychain ({exc}): "
+                "the master password will be needed again next time."
             )
 
     def _forget(self, kid: str) -> None:
         try:
             self._keychain.delete_key(kid)
         except KeychainError as exc:
-            self._warn(f"Impossibile rimuovere una chiave vecchia dal Keychain ({exc}).")
+            self._warn(f"Unable to remove an old key from the Keychain ({exc}).")
 
     # --- prompt ---------------------------------------------------------------
 
@@ -167,50 +167,52 @@ class Unlocker:
         try:
             text = self._prompt(label)
         except EOFError:
-            raise HsmError("Nessun terminale disponibile per chiedere la master password.") from None
-        # getpass restituisce uno str immutabile: lo convertiamo subito, ma
-        # l'originale resta in memoria fino al GC (limite noto).
+            raise HsmError("No terminal available to ask for the master password.") from None
+        # getpass returns an immutable str: we convert it right away, but
+        # the original stays in memory until GC (known limitation).
         try:
             return Secret.from_str(text)
         except UnicodeEncodeError:
-            # `from None`: il messaggio originale cita il carattere digitato.
-            raise HsmError("La password contiene caratteri non validi.") from None
+            # `from None`: the original message quotes the typed character.
+            raise HsmError("The password contains invalid characters.") from None
 
     def _ask_existing_password(self, header: VaultHeader) -> Secret:
         for _ in range(MAX_ATTEMPTS):
             with self._read("Master password: ") as password:
                 if len(password) == 0:
-                    self._warn("Master password vuota.")
+                    self._warn("Empty master password.")
                     continue
                 key = vault.derive_key(password, header)
             try:
                 vault.verify(self._path, key)
             except VaultAuthError:
                 key.wipe()
-                self._warn("Master password errata.")
+                self._warn("Wrong master password.")
                 continue
             except VaultError:
                 key.wipe()
                 raise
             return key
-        raise VaultAuthError("Troppi tentativi: master password errata o vault corrotto.")
+        raise VaultAuthError("Too many attempts: wrong master password or corrupted vault.")
 
     def _ask_new_password(self) -> Secret:
         for _ in range(MAX_ATTEMPTS):
-            first = self._read("Nuova master password: ")
+            first = self._read("New master password: ")
             if _char_count(first) < MIN_PASSWORD_LENGTH:
                 first.wipe()
-                self._warn(f"La master password deve avere almeno {MIN_PASSWORD_LENGTH} caratteri.")
+                self._warn(
+                    f"The master password must be at least {MIN_PASSWORD_LENGTH} characters."
+                )
                 continue
             try:
-                second = self._read("Ripeti la master password: ")
+                second = self._read("Repeat the master password: ")
             except BaseException:
-                # Ctrl-C, terminale chiuso...: azzeriamo la prima e rilanciamo.
+                # Ctrl-C, terminal closed...: wipe the first one and re-raise.
                 first.wipe()
                 raise
             with second:
                 if first == second:
                     return first
             first.wipe()
-            self._warn("Le password non coincidono.")
-        raise VaultError("Troppi tentativi: master password non impostata.")
+            self._warn("The passwords don't match.")
+        raise VaultError("Too many attempts: master password not set.")

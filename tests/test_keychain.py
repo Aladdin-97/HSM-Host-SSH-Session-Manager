@@ -16,7 +16,7 @@ KID = "0123456789abcdef"
 
 @dataclass
 class FakeSecurity:
-    """Sostituisce /usr/bin/security: registra le chiamate, risponde a copione."""
+    """Stands in for /usr/bin/security: records calls, replies from a script."""
 
     returncode: int = 0
     stdout: bytes = b""
@@ -42,7 +42,7 @@ def test_store_passes_secret_only_via_stdin() -> None:
     fake = FakeSecurity()
     _kc(fake).store_key(KID, Secret(KEY))
     argv, stdin = fake.calls[0]
-    # La riga di comando è visibile a tutti con `ps`: niente segreto lì.
+    # The command line is visible to everyone with `ps`: no secret there.
     assert argv == [SECURITY, "-i"]
     assert not any(KEY_HEX in arg for arg in argv)
     assert stdin is not None and KEY_HEX.encode() in stdin
@@ -91,7 +91,7 @@ def test_load_other_error_raises_with_reason() -> None:
 
 @pytest.mark.parametrize("stdout", [b"not-hex\n", b"abcd\n", b""])
 def test_load_malformed_item_raises(stdout: bytes) -> None:
-    with pytest.raises(KeychainError, match="non valido"):
+    with pytest.raises(KeychainError, match="Invalid Keychain item"):
         _kc(FakeSecurity(stdout=stdout)).load_key(KID)
 
 
@@ -113,13 +113,13 @@ def test_delete_other_error_raises() -> None:
         _kc(FakeSecurity(returncode=1, stderr=b"boom")).delete_key(KID)
 
 
-# --- validazione e disponibilità ----------------------------------------------
+# --- validation and availability ---------------------------------------------
 
 
 @pytest.mark.parametrize("bad", ["", "ABC", "a b", "a\nadd-generic-password", "x" * 65, "-w"])
 def test_invalid_key_id_is_rejected_everywhere(bad: str) -> None:
-    # Il key_id finisce nella riga letta da `security -i`: spazi o a capo
-    # permetterebbero di iniettare opzioni o comandi.
+    # The key_id ends up in the line read by `security -i`: spaces or newlines
+    # would allow injecting options or commands.
     kc = _kc(FakeSecurity())
     with pytest.raises(ValueError):
         kc.store_key(bad, Secret(KEY))
@@ -143,7 +143,7 @@ def test_missing_security_binary_is_unavailable() -> None:
 
 def test_timeout_is_keychain_error() -> None:
     fake = FakeSecurity(raises=subprocess.TimeoutExpired(SECURITY, 1))
-    with pytest.raises(KeychainError, match="non ha risposto"):
+    with pytest.raises(KeychainError, match="did not respond"):
         _kc(fake).load_key(KID)
 
 
@@ -152,12 +152,12 @@ def test_errors_are_hsm_errors() -> None:
     assert issubclass(KeychainError, HsmError)
 
 
-# --- integrazione con il Keychain vero (opt-in) ------------------------------
+# --- integration with the real Keychain (opt-in) -----------------------------
 
 
 @pytest.mark.skipif(
     os.environ.get("HSM_KEYCHAIN_TESTS") != "1",
-    reason="tocca il login keychain reale: abilita con HSM_KEYCHAIN_TESTS=1",
+    reason="touches the real login keychain: enable with HSM_KEYCHAIN_TESTS=1",
 )
 def test_real_keychain_roundtrip() -> None:
     kc = Keychain(service="hsm-test")
@@ -167,7 +167,7 @@ def test_real_keychain_roundtrip() -> None:
         assert kc.load_key(kid) is None
         kc.store_key(kid, Secret(KEY))
         assert kc.load_key(kid) == Secret(KEY)
-        # -U: un secondo store aggiorna invece di fallire.
+        # -U: a second store updates instead of failing.
         kc.store_key(kid, Secret(bytes(32)))
         assert kc.load_key(kid) == Secret(bytes(32))
     finally:
@@ -175,11 +175,11 @@ def test_real_keychain_roundtrip() -> None:
     assert kc.load_key(kid) is None
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings ------------------------------------------------
 
 
 def test_store_command_is_a_single_line() -> None:
-    # Invariante anti-iniezione: un solo comando, terminato dall'unico a capo.
+    # Anti-injection invariant: a single command, ended by the only newline.
     fake = FakeSecurity()
     _kc(fake).store_key(KID, Secret(KEY))
     stdin = fake.calls[0][1]
@@ -190,18 +190,18 @@ def test_store_command_is_a_single_line() -> None:
 @pytest.mark.parametrize(
     "stdout",
     [
-        KEY_HEX.upper().encode() + b"\n",  # maiuscolo: non è ciò che scriviamo noi
-        (KEY_HEX[:10] + " " + KEY_HEX[10:]).encode() + b"\n",  # spazi interni
+        KEY_HEX.upper().encode() + b"\n",  # uppercase: not what we write
+        (KEY_HEX[:10] + " " + KEY_HEX[10:]).encode() + b"\n",  # inner spaces
         KEY_HEX.encode() + b"\r\n",
     ],
 )
 def test_load_accepts_only_exact_lowercase_hex(stdout: bytes) -> None:
-    with pytest.raises(KeychainError, match="non valido"):
+    with pytest.raises(KeychainError, match="Invalid Keychain item"):
         _kc(FakeSecurity(stdout=stdout)).load_key(KID)
 
 
 def test_reason_strips_control_chars_and_is_capped() -> None:
-    # stderr è testo esterno che finisce sul terminale: niente sequenze ANSI.
+    # stderr is external text that ends up on the terminal: no ANSI sequences.
     fake = FakeSecurity(returncode=1, stderr=b"\x1b[31mevil" + b"x" * 500)
     with pytest.raises(KeychainError) as info:
         _kc(fake).load_key(KID)
@@ -212,7 +212,7 @@ def test_reason_strips_control_chars_and_is_capped() -> None:
 
 def test_store_timeout_says_state_is_unknown() -> None:
     fake = FakeSecurity(raises=subprocess.TimeoutExpired(SECURITY, 1))
-    with pytest.raises(KeychainError, match="incerto"):
+    with pytest.raises(KeychainError, match="uncertain"):
         _kc(fake).store_key(KID, Secret(KEY))
 
 
@@ -232,22 +232,22 @@ def test_default_runner_closes_stdin_when_no_input(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.parametrize(
-    "exc", [PermissionError("non eseguibile"), OSError("fork fallita"), subprocess.SubprocessError()]
+    "exc", [PermissionError("not executable"), OSError("fork failed"), subprocess.SubprocessError()]
 )
 def test_any_subprocess_failure_is_keychain_error(exc: BaseException) -> None:
-    # unlock ripiega sulla password solo per KeychainError: nient'altro deve
-    # sfuggire da qui, altrimenti un Keychain rotto bloccherebbe l'unlock.
+    # unlock falls back to the password only on KeychainError: nothing else may
+    # escape from here, otherwise a broken Keychain would block unlock.
     with pytest.raises(KeychainError):
         _kc(FakeSecurity(raises=exc)).load_key(KID)
 
 
-# --- has_key (per hsm paths) ---------------------------------------------------
+# --- has_key (for hsm paths) --------------------------------------------------
 
 
 def test_has_key_queries_attributes_only() -> None:
     fake = FakeSecurity(stdout=b'keychain: "login.keychain-db"\n')
     assert _kc(fake).has_key(KID) is True
-    # Senza -w: security restituisce solo gli attributi, mai il segreto.
+    # Without -w: security returns only the attributes, never the secret.
     assert fake.calls[0][0] == [SECURITY, "find-generic-password", "-s", "hsm", "-a", KID]
 
 

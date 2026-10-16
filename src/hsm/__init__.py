@@ -1,1 +1,1 @@
-"""hsm: inventario di host SSH con vault cifrato."""
+"""hsm: SSH host inventory with an encrypted vault."""

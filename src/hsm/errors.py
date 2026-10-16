@@ -1,9 +1,9 @@
-"""Errori di dominio di hsm e gestione delle eccezioni non catturate.
+"""hsm domain errors and handling of uncaught exceptions.
 
-Ogni `HsmError` porta un messaggio scritto per l'utente finale: la CLI lo
-stampa così com'è, senza traceback. Le eccezioni inattese invece vengono
-ridotte al solo nome del tipo, perché il loro messaggio (o le variabili
-locali di un traceback "ricco") potrebbe contenere una password.
+Every `HsmError` carries a message written for the end user: the CLI prints
+it as is, without a traceback. Unexpected exceptions, instead, are reduced to
+just their type name, because their message (or the local variables of a
+"rich" traceback) could contain a password.
 """
 
 import sys
@@ -13,33 +13,33 @@ from types import TracebackType
 
 
 class HsmError(Exception):
-    """Errore previsto: il messaggio è destinato all'utente."""
+    """Expected error: the message is meant for the user."""
 
 
 class InsecurePermissionsError(HsmError):
-    """Un file o una directory privata è accessibile ad altri utenti."""
+    """A private file or directory is accessible to other users."""
 
 
 class VaultError(HsmError):
-    """Problema generico con il vault."""
+    """Generic problem with the vault."""
 
 
 class VaultFormatError(VaultError):
-    """Il file non è un vault hsm valido o usa una versione non supportata."""
+    """The file is not a valid hsm vault or uses an unsupported version."""
 
 
 class VaultAuthError(VaultError):
-    """Decifratura fallita: password sbagliata o file manomesso."""
+    """Decryption failed: wrong password or tampered file."""
 
 
 ExceptHook = Callable[[type[BaseException], BaseException, TracebackType | None], None]
 
 
 def make_excepthook(*, debug: bool) -> ExceptHook:
-    """Costruisce un `sys.excepthook` che non espone dati sensibili.
+    """Build a `sys.excepthook` that does not expose sensitive data.
 
-    Con `debug=True` stampa il traceback standard di Python, che NON include
-    le variabili locali (a differenza di rich/typer).
+    With `debug=True` it prints Python's standard traceback, which does NOT
+    include local variables (unlike rich/typer).
     """
 
     def hook(
@@ -55,8 +55,8 @@ def make_excepthook(*, debug: bool) -> ExceptHook:
             print(f"hsm: {exc}", file=sys.stderr)
         else:
             print(
-                f"hsm: errore interno ({exc_type.__name__}). "
-                "Rilancia con --debug per i dettagli.",
+                f"hsm: internal error ({exc_type.__name__}). "
+                "Run again with --debug for details.",
                 file=sys.stderr,
             )
 

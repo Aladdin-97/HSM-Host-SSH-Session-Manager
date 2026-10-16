@@ -36,13 +36,13 @@ def web01(**overrides: object) -> Host:
         "tags": ("prod", "web"),
         "jump_host": "bastion",
         "identity_file": "~/.ssh/id_ed25519",
-        "note": "frontend principale",
+        "note": "main frontend",
     }
     fields.update(overrides)
     return Host(**fields)  # type: ignore[arg-type]
 
 
-# --- Host: valori di default e validazione ----------------------------------
+# --- Host: defaults and validation ------------------------------------------
 
 
 def test_host_defaults() -> None:
@@ -66,10 +66,10 @@ def test_invalid_alias(alias: str) -> None:
 @pytest.mark.parametrize(
     "hostname",
     [
-        "-oProxyCommand=touch /tmp/pwned",  # verrebbe letto da ssh come opzione
+        "-oProxyCommand=touch /tmp/pwned",  # would be read by ssh as an option
         "",
         "host name",
-        "host\nProxyCommand evil",  # iniezione in ~/.ssh/config
+        "host\nProxyCommand evil",  # injection into ~/.ssh/config
         "host#comment",
         "user@host",
     ],
@@ -134,7 +134,7 @@ def test_identity_file_may_contain_spaces() -> None:
 
 def test_note_rejects_control_characters() -> None:
     with pytest.raises(InvalidHostError, match="note"):
-        web01(note="riga\x1b[31m")
+        web01(note="line\x1b[31m")
 
 
 # --- load ---------------------------------------------------------------------
@@ -155,7 +155,7 @@ port = 2222
 tags = ["web", "prod"]
 jump_host = "bastion"
 identity_file = "~/.ssh/id_ed25519"
-note = "frontend principale"
+note = "main frontend"
 
 [hosts.db]
 hostname = "db.example.com"
@@ -182,7 +182,7 @@ def test_filter_by_tag(path: Path) -> None:
 
 def test_invalid_toml_reports_location(path: Path) -> None:
     _write(path, "[hosts.web01\nhostname = 1\n")
-    with pytest.raises(InventoryError, match="line 1|riga 1"):
+    with pytest.raises(InventoryError, match="line 1"):
         Inventory.load(path)
 
 
@@ -221,7 +221,7 @@ def test_permissive_file_is_refused(path: Path) -> None:
         Inventory.load(path)
 
 
-# --- modifica e salvataggio ---------------------------------------------------
+# --- editing and saving ------------------------------------------------------
 
 
 def test_add_save_load_roundtrip(path: Path) -> None:
@@ -266,7 +266,7 @@ def test_update_replaces_fields_and_clears_none(path: Path) -> None:
     inv.save()
     text = path.read_text()
     assert "user" not in text and "note" not in text
-    assert "port" not in text  # il default non viene scritto
+    assert "port" not in text  # the default is not written
     assert Inventory.load(path).get("web01") == web01(user=None, note=None, port=DEFAULT_PORT)
 
 
@@ -278,9 +278,9 @@ def test_update_missing(path: Path) -> None:
 def test_edits_preserve_user_comments(path: Path) -> None:
     _write(
         path,
-        """# I miei server — non toccare a mano il blocco lab
+        """# My servers — do not hand-edit the lab block
 [hosts.web01]
-hostname = "10.0.0.1"  # IP interno
+hostname = "10.0.0.1"  # internal IP
 port = 2222
 
 [hosts.db]
@@ -293,7 +293,7 @@ hostname = "db"
     inv.add(Host(alias="lab", hostname="lab"))
     inv.save()
     text = path.read_text()
-    assert "# I miei server — non toccare a mano il blocco lab" in text
+    assert "# My servers — do not hand-edit the lab block" in text
     assert '"10.0.0.2"' in text
 
 
@@ -323,7 +323,7 @@ def test_referenced_by(path: Path) -> None:
 
 
 def test_secrets_never_stored(path: Path) -> None:
-    # hosts.toml è versionabile: Host non ha nessun campo per password.
+    # hosts.toml can be version-controlled: Host has no password field.
     assert not any("pass" in f for f in Host.__dataclass_fields__)
 
 
@@ -333,12 +333,12 @@ def test_non_string_tag_in_file_is_rejected(path: Path) -> None:
         Inventory.load(path)
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings ------------------------------------------------
 
 
 @pytest.mark.parametrize("jump", ["none", "None", "NONE", "admin@none"])
 def test_jump_none_would_silently_skip_the_bastion(jump: str) -> None:
-    # `ProxyJump none` / `-J none` significano "nessun salto": rifiutato.
+    # `ProxyJump none` / `-J none` mean "no hop": rejected.
     with pytest.raises(InvalidHostError, match="jump_host"):
         web01(jump_host=jump)
 
@@ -370,7 +370,7 @@ def test_hostname_valid_forms(hostname: str) -> None:
 
 @pytest.mark.parametrize("ident", ["key\\", "~/.ssh/%h", "   "])
 def test_identity_file_rejects_backslash_percent_blank(ident: str) -> None:
-    # Dentro le virgolette di ssh_config "\" fa da escape e "%x" viene espanso.
+    # Inside ssh_config quotes "\" escapes and "%x" is expanded.
     with pytest.raises(InvalidHostError, match="identity_file"):
         web01(identity_file=ident)
 
@@ -381,7 +381,7 @@ def test_tags_must_be_a_sequence_not_a_string() -> None:
 
 
 def test_alias_unique_case_insensitively(path: Path) -> None:
-    # ssh confronta i pattern Host senza distinguere maiuscole.
+    # ssh matches Host patterns case-insensitively.
     inv = Inventory.load(path)
     inv.add(web01())
     with pytest.raises(HostExistsError):
@@ -395,8 +395,8 @@ def test_alias_case_duplicate_in_file_is_rejected(path: Path) -> None:
 
 
 def test_alias_cannot_shadow_another_hosts_hostname(path: Path) -> None:
-    # "Host 10.0.0.1" catturerebbe chi digita `ssh 10.0.0.1` e lo porterebbe
-    # su un altro HostName/User/IdentityFile.
+    # "Host 10.0.0.1" would capture anyone typing `ssh 10.0.0.1` and send
+    # them to a different HostName/User/IdentityFile.
     inv = Inventory.load(path)
     inv.add(Host(alias="db", hostname="10.0.0.1"))
     with pytest.raises(InventoryError, match="10.0.0.1"):
@@ -427,7 +427,7 @@ def test_jump_host_odd_shapes(jump: object) -> None:
 
 def test_host_entry_must_be_a_table(path: Path) -> None:
     _write(path, '[hosts]\nweb01 = "10.0.0.1"\n')
-    with pytest.raises(InventoryError, match="web01.*tabella"):
+    with pytest.raises(InventoryError, match="web01.*table"):
         Inventory.load(path)
 
 
@@ -435,26 +435,26 @@ def test_host_entry_must_be_a_table(path: Path) -> None:
     "hostname", ["fe80::1%a b", 'fe80::1%"x', "fe80::1%a#b", "fe80::1%a\\b", "fe80::1%${HOME}", "fe80::1%-o"]
 )
 def test_ipv6_zone_is_restricted(hostname: str) -> None:
-    # ipaddress accetta qualsiasi zona; in ssh_config uno spazio o una
-    # virgoletta lì renderebbero invalido l'intero file.
+    # ipaddress accepts any zone; in ssh_config a space or a quote
+    # there would make the whole file invalid.
     with pytest.raises(InvalidHostError, match="hostname"):
         web01(hostname=hostname)
 
 
 def test_identity_file_rejects_dollar() -> None:
-    # OpenSSH espande ${VAR} in IdentityFile.
+    # OpenSSH expands ${VAR} in IdentityFile.
     with pytest.raises(InvalidHostError, match="identity_file"):
         web01(identity_file="${HOME}/.ssh/id")
 
 
 def test_identity_file_must_be_absolute_or_home_relative() -> None:
-    # Un percorso relativo dipenderebbe dalla directory corrente.
+    # A relative path would depend on the current directory.
     with pytest.raises(InvalidHostError, match="identity_file"):
         web01(identity_file="keys/id_ed25519")
     assert web01(identity_file="/etc/ssh/id").identity_file == "/etc/ssh/id"
 
 
-# --- campo auth -----------------------------------------------------------------
+# --- auth field -----------------------------------------------------------------
 
 
 def test_auth_defaults_to_key_and_is_not_written(path: Path) -> None:
@@ -478,7 +478,7 @@ def test_auth_rejects_unknown_values(bad: str) -> None:
         web01(auth=bad)
 
 
-# --- rinomina ---------------------------------------------------------------------
+# --- rename -----------------------------------------------------------------------
 
 
 def test_rename_moves_host_and_keeps_fields(path: Path) -> None:
@@ -496,7 +496,7 @@ def test_rename_updates_jump_host_of_other_hosts(path: Path) -> None:
     inv = Inventory.load(path)
     inv.add(Host(alias="bastion", hostname="b"))
     inv.add(web01())  # jump_host = "bastion"
-    inv.add(Host(alias="db", hostname="db", jump_host="Bastion"))  # ssh non distingue maiuscole
+    inv.add(Host(alias="db", hostname="db", jump_host="Bastion"))  # ssh is case-insensitive
     assert inv.rename("bastion", "gw") == ["db", "web01"]
     assert inv.get("web01").jump_host == "gw"
     assert inv.get("db").jump_host == "gw"
@@ -509,12 +509,12 @@ def test_rename_conflicts(path: Path) -> None:
     with pytest.raises(HostExistsError):
         inv.rename("web01", "DB")
     with pytest.raises(InventoryError, match="db.example.com"):
-        inv.rename("web01", "db.example.com")  # hostname di un altro host
+        inv.rename("web01", "db.example.com")  # another host's hostname
     with pytest.raises(InvalidHostError, match="alias"):
         inv.rename("web01", "bad alias")
     with pytest.raises(HostNotFound):
         inv.rename("nope", "x")
-    assert inv.get("web01") == web01()  # nulla è cambiato
+    assert inv.get("web01") == web01()  # nothing changed
 
 
 def test_rename_case_only(path: Path) -> None:
@@ -527,9 +527,9 @@ def test_rename_case_only(path: Path) -> None:
 def test_rename_preserves_comments(path: Path) -> None:
     _write(
         path,
-        """# I miei server
+        """# My servers
 [hosts.web01]
-hostname = "10.0.0.1"  # IP interno
+hostname = "10.0.0.1"  # internal IP
 port = 2222
 """,
     )
@@ -537,5 +537,5 @@ port = 2222
     inv.rename("web01", "web02")
     inv.save()
     text = path.read_text()
-    assert "# I miei server" in text and "# IP interno" in text
+    assert "# My servers" in text and "# internal IP" in text
     assert "[hosts.web02]" in text and "web01" not in text

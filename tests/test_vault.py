@@ -9,8 +9,8 @@ from hsm.errors import InsecurePermissionsError, VaultAuthError, VaultError, Vau
 from hsm.secret import Secret
 from hsm.vault import HEADER_SIZE, KdfParams, VaultEntry
 
-# Parametri minimi per tenere i test veloci (ms invece di ~1 s).
-# I parametri reali sono verificati a parte in test_default_kdf_params.
+# Minimal parameters to keep tests fast (ms instead of ~1 s).
+# The real parameters are checked separately in test_default_kdf_params.
 FAST = KdfParams(memory_cost_kib=8, time_cost=1, parallelism=1)
 
 
@@ -34,7 +34,7 @@ def _flip(path: Path, offset: int) -> None:
     path.write_bytes(bytes(data))
 
 
-# --- parametri ---------------------------------------------------------------
+# --- parameters --------------------------------------------------------------
 
 
 def test_default_kdf_params() -> None:
@@ -44,9 +44,9 @@ def test_default_kdf_params() -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"memory_cost_kib": 7, "time_cost": 1, "parallelism": 1},  # sotto 8*p
-        {"memory_cost_kib": 600_000, "time_cost": 1, "parallelism": 1},  # oltre il tetto
-        {"memory_cost_kib": 64, "time_cost": 9, "parallelism": 1},  # oltre il tetto
+        {"memory_cost_kib": 7, "time_cost": 1, "parallelism": 1},  # below 8*p
+        {"memory_cost_kib": 600_000, "time_cost": 1, "parallelism": 1},  # above the cap
+        {"memory_cost_kib": 64, "time_cost": 9, "parallelism": 1},  # above the cap
         {"memory_cost_kib": 64, "time_cost": 0, "parallelism": 1},
         {"memory_cost_kib": 64, "time_cost": 1, "parallelism": 0},
     ],
@@ -84,12 +84,12 @@ def test_wrong_password_is_auth_error(vault_path: Path, key: Secret) -> None:
 
 
 def test_create_refuses_existing_vault(vault_path: Path, key: Secret) -> None:
-    with pytest.raises(VaultError, match="Esiste già"):
+    with pytest.raises(VaultError, match="already exists"):
         vault.create(vault_path, pw(), FAST)
 
 
 def test_create_rejects_empty_password(vault_path: Path) -> None:
-    with pytest.raises(VaultError, match="vuota"):
+    with pytest.raises(VaultError, match="empty"):
         vault.create(vault_path, pw(""), FAST)
 
 
@@ -99,7 +99,7 @@ def test_create_makes_private_dir_and_file(vault_path: Path, key: Secret) -> Non
 
 
 def test_load_missing_vault_is_vault_error(tmp_path: Path) -> None:
-    with pytest.raises(VaultError, match="non trovato"):
+    with pytest.raises(VaultError, match="not found"):
         vault.read_header(tmp_path / "nope.enc")
 
 
@@ -113,14 +113,14 @@ def test_plaintext_password_never_on_disk(vault_path: Path, key: Secret) -> None
     vault.save(vault_path, key, {"web01": VaultEntry.new(pw("UNIQUE-PLAINTEXT-123"))})
     raw = vault_path.read_bytes()
     assert b"UNIQUE-PLAINTEXT-123" not in raw
-    assert b"web01" not in raw  # anche gli alias sono cifrati
+    assert b"web01" not in raw  # aliases are encrypted too
 
 
 def test_entry_repr_hides_password() -> None:
     assert "s3cret" not in repr(VaultEntry.new(pw("s3cret")))
 
 
-# --- nonce e salt ------------------------------------------------------------
+# --- nonce and salt ----------------------------------------------------------
 
 
 def test_every_save_uses_a_fresh_nonce(vault_path: Path, key: Secret) -> None:
@@ -152,7 +152,7 @@ def test_different_vaults_get_different_salts(tmp_path: Path) -> None:
     assert vault.read_header(a).salt != vault.read_header(b).salt
 
 
-# --- manomissioni ------------------------------------------------------------
+# --- tampering ---------------------------------------------------------------
 
 
 def test_tampered_ciphertext_is_rejected(vault_path: Path, key: Secret) -> None:
@@ -174,8 +174,8 @@ def test_tampered_nonce_is_rejected(vault_path: Path, key: Secret) -> None:
 
 
 def test_tampered_kdf_params_are_rejected(vault_path: Path, key: Secret) -> None:
-    # time_cost sta agli offset 10..13. Un valore ancora valido (2 invece di 1)
-    # supera il parsing: deve essere fermato dall'autenticazione.
+    # time_cost is at offsets 10..13. A still valid value (2 instead of 1)
+    # passes parsing: it must be stopped by authentication.
     data = bytearray(vault_path.read_bytes())
     data[10:14] = (2).to_bytes(4, "big")
     vault_path.write_bytes(bytes(data))
@@ -191,7 +191,7 @@ def test_bad_magic_is_format_error(vault_path: Path, key: Secret) -> None:
 
 def test_unsupported_version_is_format_error(vault_path: Path, key: Secret) -> None:
     _flip(vault_path, 4)
-    with pytest.raises(VaultFormatError, match="versione"):
+    with pytest.raises(VaultFormatError, match="version"):
         vault.read_header(vault_path)
 
 
@@ -202,7 +202,7 @@ def test_truncated_file_is_format_error(vault_path: Path, key: Secret) -> None:
 
 
 def test_header_with_absurd_memory_is_format_error(vault_path: Path, key: Secret) -> None:
-    # Un header manomesso non deve poterci far allocare gigabyte.
+    # A tampered header must not be able to make us allocate gigabytes.
     data = bytearray(vault_path.read_bytes())
     data[6:10] = (0xFFFFFFFF).to_bytes(4, "big")
     vault_path.write_bytes(bytes(data))
@@ -210,7 +210,7 @@ def test_header_with_absurd_memory_is_format_error(vault_path: Path, key: Secret
         vault.read_header(vault_path)
 
 
-# --- save con chiave sbagliata e rekey ---------------------------------------
+# --- save with wrong key and rekey -------------------------------------------
 
 
 def test_save_with_wrong_key_refuses_and_keeps_file(vault_path: Path, key: Secret) -> None:
@@ -235,7 +235,7 @@ def test_rekey_changes_salt_and_password(vault_path: Path, key: Secret) -> None:
 
 
 def test_rekey_rejects_empty_password(vault_path: Path, key: Secret) -> None:
-    with pytest.raises(VaultError, match="vuota"):
+    with pytest.raises(VaultError, match="empty"):
         vault.rekey(vault_path, key, pw(""), FAST)
 
 
@@ -249,7 +249,7 @@ def test_key_id_tracks_salt(vault_path: Path, key: Secret) -> None:
 
 def test_file_shorter_than_header_is_format_error(vault_path: Path, key: Secret) -> None:
     vault_path.write_bytes(b"HSMV\x01")
-    with pytest.raises(VaultFormatError, match="troncato"):
+    with pytest.raises(VaultFormatError, match="truncated"):
         vault.read_header(vault_path)
 
 
@@ -259,11 +259,11 @@ def test_unknown_kdf_id_is_format_error(vault_path: Path, key: Secret) -> None:
         vault.read_header(vault_path)
 
 
-# --- payload autenticato ma non valido ---------------------------------------
+# --- authenticated but invalid payload ---------------------------------------
 
 
 def _reencrypt(path: Path, key: Secret, plaintext: bytes) -> None:
-    """Scrive un payload arbitrario cifrato correttamente con `key`."""
+    """Write an arbitrary payload, correctly encrypted with `key`."""
     header = path.read_bytes()[: HEADER_SIZE]
     nonce = header[-12:]
     path.write_bytes(header + AESGCM(key.view()).encrypt(nonce, plaintext, header))
@@ -275,24 +275,24 @@ def _reencrypt(path: Path, key: Secret, plaintext: bytes) -> None:
 )
 def test_malformed_payload_is_format_error(vault_path: Path, key: Secret, plaintext: bytes) -> None:
     _reencrypt(vault_path, key, plaintext)
-    with pytest.raises(VaultFormatError, match="non valido"):
+    with pytest.raises(VaultFormatError, match="Invalid vault content"):
         vault.load(vault_path, key)
 
 
 def test_unknown_payload_schema_is_format_error(vault_path: Path, key: Secret) -> None:
     _reencrypt(vault_path, key, b'{"schema": 2, "entries": {}}')
-    with pytest.raises(VaultFormatError, match="Schema"):
+    with pytest.raises(VaultFormatError, match="Payload schema"):
         vault.load(vault_path, key)
 
 
 def test_create_never_overwrites_a_vault_created_concurrently(
     vault_path: Path, key: Secret, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Simula la gara: il controllo iniziale non vede il file, ma intanto un
-    # altro processo lo ha creato. Il vault esistente deve restare intatto.
+    # Simulates the race: the initial check doesn't see the file, but in the
+    # meantime another process created it. The existing vault must stay intact.
     before = vault_path.read_bytes()
     monkeypatch.setattr(vault.os.path, "lexists", lambda p: False)
-    with pytest.raises(VaultError, match="Esiste già"):
+    with pytest.raises(VaultError, match="already exists"):
         vault.create(vault_path, pw("other"), FAST)
     assert vault_path.read_bytes() == before
 
@@ -304,6 +304,6 @@ def test_non_utf8_password_is_clean_vault_error(vault_path: Path, key: Secret) -
 
 def test_verify_accepts_right_key_and_rejects_wrong(vault_path: Path, key: Secret) -> None:
     vault.save(vault_path, key, {"a": VaultEntry.new(pw("x"))})
-    vault.verify(vault_path, key)  # non solleva, non decodifica le voci
+    vault.verify(vault_path, key)  # doesn't raise, doesn't decode the entries
     with pytest.raises(VaultAuthError):
         vault.verify(vault_path, Secret(bytes(32)))

@@ -1,48 +1,48 @@
-"""Password automatica per ssh tramite SSH_ASKPASS, senza sshpass.
+"""Automatic ssh password via SSH_ASKPASS, without sshpass.
 
-OpenSSH sa chiedere la password a un programma esterno invece che al
-terminale: con SSH_ASKPASS=<programma> e SSH_ASKPASS_REQUIRE=force, a ogni
-domanda ssh lancia `<programma> "<testo della domanda>"` e legge la risposta
-dal suo stdout. Il programma qui è `hsm-askpass` (la funzione `main` sotto).
+OpenSSH can ask an external program for the password instead of the
+terminal: with SSH_ASKPASS=<program> and SSH_ASKPASS_REQUIRE=force, for every
+question ssh runs `<program> "<question text>"` and reads the answer from its
+stdout. The program here is `hsm-askpass` (the `main` function below).
 
-    hsm connect ──► AskpassServer (socket Unix privato, solo durante il connect)
+    hsm connect ──► AskpassServer (private Unix socket, only during connect)
         │                    ▲
         └─► /usr/bin/ssh ──► hsm-askpass "admin@10.0.0.9's password: "
-                                 │  token + domanda ──►  server
-                                 │  ◄── password / "chiedi all'utente" / "no"
+                                 │  token + question ──►  server
+                                 │  ◄── password / "ask the user" / "no"
                                  └─► stdout ──► ssh
 
-Perché un socket: ssh chiude all'avvio tutti i file descriptor oltre
-stdin/stdout/stderr, quindi una pipe passata da hsm non arriverebbe
-all'helper (cosa che invece funzionava con sshpass).
+Why a socket: at startup ssh closes every file descriptor beyond
+stdin/stdout/stderr, so a pipe passed down by hsm would never reach the
+helper (which did work with sshpass).
 
-Le regole, tutte verificate dai test:
-- la password va SOLO alla domanda esatta "<user>@<host>'s password: " (o
-  "(<user>@<host>) Password: ", keyboard-interactive) dell'host di
-  destinazione, e SOLO a un helper figlio del processo ssh principale. Il
-  pid lo verifica il kernel (LOCAL_PEERPID), non lo dichiara l'helper.
-  Così il ssh figlio che ssh lancia per un jump host (-J) non la riceve,
-  nemmeno se quel bastion avesse lo stesso user@host su un'altra porta;
-- tutto il resto (conferma della chiave host, password del bastion, OTP,
-  passphrase) viene girato a te sul terminale. La conferma di una chiave
-  host sconosciuta non riceve MAI risposta automatica: un "yes" automatico
-  accetterebbe un server qualsiasi (verificato: con SSH_ASKPASS_REQUIRE=force
-  anche quella domanda passa da qui);
-- il testo delle domande può venire dal server (keyboard-interactive):
-  prima di mostrarlo togliamo i caratteri di controllo, e la risposta si
-  vede mentre la scrivi solo per la vera domanda di ssh sulla chiave host;
-- la password viene fornita una volta sola: se ssh la richiede, era
-  sbagliata, e la parola passa a te;
-- niente segreti nell'ambiente: ssh e l'helper ricevono solo il percorso
-  del socket e un token casuale, che senza il server attivo non vale nulla;
-- il socket vive in una directory 0700 creata per l'occasione e viene
-  rimosso a fine connessione.
+The rules, all covered by tests:
+- the password goes ONLY to the exact question "<user>@<host>'s password: "
+  (or "(<user>@<host>) Password: ", keyboard-interactive) of the destination
+  host, and ONLY to a helper that is a child of the main ssh process. The
+  pid is checked by the kernel (LOCAL_PEERPID), not claimed by the helper.
+  So the child ssh that ssh spawns for a jump host (-J) does not get it,
+  even if that bastion had the same user@host on another port;
+- everything else (host key confirmation, bastion password, OTP,
+  passphrase) is relayed to you on the terminal. Confirming an unknown host
+  key NEVER gets an automatic answer: an automatic "yes" would accept any
+  server (verified: with SSH_ASKPASS_REQUIRE=force that question comes
+  through here too);
+- the question text can come from the server (keyboard-interactive): we
+  strip control characters before showing it, and the answer is echoed
+  while you type only for ssh's real host key question;
+- the password is supplied once only: if ssh asks again, it was wrong, and
+  you take over;
+- no secrets in the environment: ssh and the helper get only the socket
+  path and a random token, worthless without the running server;
+- the socket lives in a 0700 directory created for the occasion and is
+  removed when the connection ends.
 
-Limite: i processi che ssh lancia per conto tuo (ProxyCommand, LocalCommand,
-`Match exec` del tuo ~/.ssh/config) sono anch'essi figli di ssh ed ereditano
-token e socket: potrebbero chiedere la password al posto dell'helper. Sono
-comandi che hai configurato tu e girano con il tuo utente, cioè dentro il
-confine di fiducia di hsm (vedi THREAT_MODEL.md).
+Limitation: processes ssh runs on your behalf (ProxyCommand, LocalCommand,
+`Match exec` in your ~/.ssh/config) are also children of ssh and inherit
+token and socket: they could ask for the password in place of the helper.
+They are commands you configured yourself, running as your user, i.e.
+inside hsm's trust boundary (see THREAT_MODEL.md).
 """
 
 import contextlib
@@ -68,7 +68,7 @@ from hsm.secret import Secret
 ENV_SOCKET = "HSM_ASKPASS_SOCKET"
 ENV_TOKEN = "HSM_ASKPASS_TOKEN"
 
-# Risposte del server all'helper (un byte di tipo, poi l'eventuale dato).
+# Server replies to the helper (one type byte, then any data).
 _PASSWORD = b"P"
 _ASK_USER = b"A"
 _DENY = b"D"
@@ -76,8 +76,8 @@ _DENY = b"D"
 _MAX_REQUEST = 16 * 1024
 _IO_TIMEOUT = 5.0
 
-# macOS: getsockopt(SOL_LOCAL, LOCAL_PEERPID) restituisce il pid del
-# processo all'altro capo di un socket Unix, garantito dal kernel.
+# macOS: getsockopt(SOL_LOCAL, LOCAL_PEERPID) returns the pid of the
+# process at the other end of a Unix socket, guaranteed by the kernel.
 _SOL_LOCAL = 0
 _LOCAL_PEERPID = 2
 
@@ -92,29 +92,29 @@ Notify = Callable[[str], None]
 
 
 def is_password_prompt(prompt: str, *, user: str, hostname: str) -> bool:
-    """True solo per la domanda di password di `user@hostname`.
+    """True only for the password question of `user@hostname`.
 
-    Confronto esatto sull'intera stringa: un testo che contiene la domanda
-    in mezzo ad altro (o seguita da un'altra domanda) non vale.
+    Exact match on the whole string: a text that contains the question
+    amid other text (or followed by another question) does not count.
     """
     target = f"{re.escape(user)}@{re.escape(hostname)}"
-    # Autenticazione "password":        admin@10.0.0.9's password:
+    # "password" authentication:       admin@10.0.0.9's password:
     # Keyboard-interactive (OpenSSH 8+): (admin@10.0.0.9) Password:
     pattern = rf"{target}'s password: |\({target}\) (?i:password): ?"
     return re.fullmatch(pattern, prompt) is not None
 
 
 def is_host_key_question(prompt: str) -> bool:
-    """True per la domanda di ssh su una chiave host sconosciuta.
+    """True for ssh's question about an unknown host key.
 
-    Un server non può imitarla: il testo keyboard-interactive che sceglie
-    arriva sempre prefissato da ssh con "(user@host) ".
+    A server cannot imitate it: any keyboard-interactive text it chooses
+    always arrives prefixed by ssh with "(user@host) ".
     """
     return _HOST_KEY_QUESTION.fullmatch(prompt) is not None
 
 
 def _printable(text: str) -> str:
-    """Il testo senza caratteri di controllo (sequenze ANSI, BEL...), a capo esclusi."""
+    """The text without control characters (ANSI sequences, BEL...), except newlines."""
     return "".join(c for c in text if c == "\n" or c.isprintable())
 
 
@@ -135,7 +135,7 @@ def _parent_pid(pid: int) -> int | None:
 
 
 class AskpassServer:
-    """Serve la password a hsm-askpass per la durata di un `with`."""
+    """Serves the password to hsm-askpass for the duration of a `with`."""
 
     def __init__(
         self,
@@ -148,12 +148,12 @@ class AskpassServer:
     ) -> None:
         view = password.view()
         if 0x0A in view or 0x0D in view or 0x00 in view:
-            # ssh legge una riga dallo stdout dell'helper: un a capo la
-            # spezzerebbe.
-            raise ValueError("la password contiene un a capo o un byte nullo")
-        self._password = Secret(bytearray(view))  # copia propria, azzerata in __exit__
-        # Le coppie (utente, host) con cui ssh può presentare la domanda:
-        # quelle dell'inventario e quelle effettive secondo `ssh -G`.
+            # ssh reads one line from the helper's stdout: a newline would
+            # break it.
+            raise ValueError("the password contains a newline or a null byte")
+        self._password = Secret(bytearray(view))  # own copy, wiped in __exit__
+        # The (user, host) pairs ssh may use in the question: the
+        # inventory ones and the effective ones according to `ssh -G`.
         self._names = {(user, hostname), *aliases}
         self._token = secrets.token_hex(32)
         self._answered = False
@@ -164,18 +164,18 @@ class AskpassServer:
         self._dir: Path | None = None
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
-        #: quante volte ssh ha richiesto la password dopo averla già ricevuta
+        #: how many times ssh asked for the password again after receiving it
         self.rejected = 0
 
     def expect_ssh(self, pid: int) -> None:
-        """Il pid del processo ssh principale: solo i suoi helper ricevono la password."""
+        """The pid of the main ssh process: only its helpers receive the password."""
         self._ssh_pid = pid
         self._ssh_known.set()
 
     def __enter__(self) -> Self:
-        # mkdtemp crea la directory con permessi 0700: solo noi possiamo
-        # anche solo vedere il socket. Sta in $TMPDIR, che su macOS è già
-        # per-utente (/var/folders/...).
+        # mkdtemp creates the directory with mode 0700: only we can even
+        # see the socket. It lives in $TMPDIR, which on macOS is already
+        # per-user (/var/folders/...).
         self._dir = Path(tempfile.mkdtemp(prefix="hsm-askpass-"))
         path = self._dir / "s"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -183,14 +183,14 @@ class AskpassServer:
             sock.bind(str(path))
             os.chmod(path, 0o600)
             sock.listen(8)
-            sock.settimeout(0.2)  # per poter controllare _stop
+            sock.settimeout(0.2)  # so we can check _stop
         except OSError as exc:
             sock.close()
             self._cleanup()
-            # Il caso tipico: percorso oltre i ~104 byte ammessi per un socket Unix.
+            # The typical case: a path beyond the ~104 bytes allowed for a Unix socket.
             raise HsmError(
-                f"Impossibile creare il socket per la password ({exc.strerror}). "
-                "Se TMPDIR è un percorso molto lungo, usane uno più corto."
+                f"Cannot create the password socket ({exc.strerror}). "
+                "If TMPDIR is a very long path, use a shorter one."
             ) from None
         self._sock = sock
         self._thread = threading.Thread(target=self._serve, name="hsm-askpass", daemon=True)
@@ -212,12 +212,12 @@ class AskpassServer:
         self._password.wipe()
 
     def env(self, helper: str) -> dict[str, str]:
-        """Le variabili da aggiungere all'ambiente di ssh. Nessun segreto."""
+        """The variables to add to ssh's environment. No secrets."""
         if self._dir is None:
-            raise RuntimeError("AskpassServer va usato dentro un `with`")
+            raise RuntimeError("AskpassServer must be used inside a `with`")
         return {
             "SSH_ASKPASS": helper,
-            # force: usa l'helper anche se c'è un terminale (OpenSSH ≥ 8.4).
+            # force: use the helper even when there is a terminal (OpenSSH ≥ 8.4).
             "SSH_ASKPASS_REQUIRE": "force",
             ENV_SOCKET: str(self._dir / "s"),
             ENV_TOKEN: self._token,
@@ -238,12 +238,12 @@ class AskpassServer:
             except TimeoutError:
                 continue
             except OSError:
-                return  # socket chiuso
+                return  # socket closed
             with conn:
                 try:
                     self._handle(conn)
                 except OSError:
-                    pass  # helper sparito o lento: semplicemente non riceve nulla
+                    pass  # helper gone or slow: it simply gets nothing
 
     def _handle(self, conn: socket.socket) -> None:
         conn.settimeout(_IO_TIMEOUT)
@@ -253,8 +253,8 @@ class AskpassServer:
             conn.sendall(_DENY)
             return
         prompt = raw_prompt.decode("utf-8", errors="replace")
-        # kind non vuoto = domanda di conferma o informativa (SSH_ASKPASS_PROMPT):
-        # mai una password.
+        # non-empty kind = confirmation or informational question
+        # (SSH_ASKPASS_PROMPT): never a password.
         if kind or not any(
             is_password_prompt(prompt, user=u, hostname=h) for u, h in self._names
         ):
@@ -264,23 +264,23 @@ class AskpassServer:
             conn.sendall(_ASK_USER)
             return
         if self._answered:
-            # ssh la richiede: quella che abbiamo dato era sbagliata.
+            # ssh asks again: the one we gave was wrong.
             self.rejected += 1
             conn.sendall(_ASK_USER)
             return
         self._deliver(conn)
-        # Solo dopo un invio riuscito: se l'helper è sparito a metà, la
-        # prossima richiesta riceve ancora la password.
+        # Only after a successful send: if the helper vanished midway, the
+        # next request still gets the password.
         self._answered = True
 
     def _from_main_ssh(self, conn: socket.socket) -> bool:
-        """L'helper all'altro capo è figlio del processo ssh principale?"""
+        """Is the helper at the other end a child of the main ssh process?"""
         if not self._ssh_known.wait(self._pid_wait):
             return False
         try:
             peer = conn.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID)
         except OSError:
-            return False  # senza la verifica del kernel, niente password
+            return False  # without the kernel's check, no password
         return _parent_pid(peer) == self._ssh_pid
 
     def _deliver(self, conn: socket.socket) -> None:
@@ -311,15 +311,16 @@ def _request(path: str, token: str, kind: str, prompt: str) -> bytes:
 
 @contextlib.contextmanager
 def _restore_tty_on_sigterm() -> Iterator[None]:
-    # ssh può terminare l'helper con SIGTERM mentre aspetta una risposta.
-    # Il default ucciderebbe il processo senza eseguire i `finally` di
-    # getpass, lasciando il terminale senza eco: lo trasformiamo in SystemExit.
+    # ssh may terminate the helper with SIGTERM while it waits for an answer.
+    # The default would kill the process without running getpass's
+    # `finally` blocks, leaving the terminal without echo: we turn it into
+    # SystemExit.
     def stop(signum: int, frame: FrameType | None) -> None:
         raise SystemExit(128 + signum)
 
     try:
         previous = signal.signal(signal.SIGTERM, stop)
-    except ValueError:  # non siamo nel thread principale (es. nei test)
+    except ValueError:  # not in the main thread (e.g. in tests)
         yield
         return
     try:
@@ -329,7 +330,7 @@ def _restore_tty_on_sigterm() -> Iterator[None]:
 
 
 def _relay_to_tty(prompt: str) -> str | None:
-    """Gira la domanda all'utente sul terminale. None se non c'è un terminale."""
+    """Relays the question to the user on the terminal. None if there is no terminal."""
     shown = _printable(prompt)
     try:
         tty = open("/dev/tty", "r+", encoding="utf-8", errors="replace")  # noqa: SIM115
@@ -337,14 +338,14 @@ def _relay_to_tty(prompt: str) -> str | None:
         return None
     with tty:
         if is_host_key_question(prompt):
-            # Conferma della chiave host: la risposta si vede mentre la scrivi.
+            # Host key confirmation: the answer is echoed while you type it.
             tty.write(shown)
             tty.flush()
             line = tty.readline()
             return line.rstrip("\n") if line else None
     try:
         with _restore_tty_on_sigterm():
-            return getpass.getpass(shown)  # legge da /dev/tty senza eco
+            return getpass.getpass(shown)  # reads from /dev/tty without echo
     except EOFError:
         return None
 
@@ -362,7 +363,7 @@ def main(
     relay: Relay | None = None,
     notify: Notify | None = None,
 ) -> int:
-    """Entry point di `hsm-askpass`, lanciato da ssh con la domanda come argomento."""
+    """Entry point of `hsm-askpass`, run by ssh with the question as argument."""
     argv = sys.argv if argv is None else argv
     env = os.environ if env is None else env
     out = stdout if stdout is not None else sys.stdout.buffer
@@ -372,8 +373,8 @@ def main(
     kind = env.get("SSH_ASKPASS_PROMPT", "")
 
     if kind == "none":
-        # Solo informativa (es. "tocca la chiave di sicurezza"): ssh non
-        # aspetta risposta e chiuderà l'helper quando non serve più.
+        # Informational only (e.g. "touch your security key"): ssh expects
+        # no answer and will close the helper when no longer needed.
         show(prompt)
         return 0
 
@@ -383,10 +384,10 @@ def main(
         try:
             reply = _request(path, token, kind, prompt)
         except OSError:
-            reply = None  # server non raggiungibile: si chiede all'utente
+            reply = None  # server unreachable: ask the user
     if reply is not None and reply.startswith(_PASSWORD):
-        # `reply` è una copia immutabile della password: limite noto, vive
-        # solo fino alla fine di questo processo, che termina subito.
+        # `reply` is an immutable copy of the password: a known limitation,
+        # it lives only until this process ends, which is right away.
         out.write(reply[len(_PASSWORD) :] + b"\n")
         out.flush()
         return 0
@@ -394,7 +395,7 @@ def main(
         return 1
     answer = ask_user(prompt)
     if answer is None:
-        return 1  # nessuna risposta: per ssh vale "no"
+        return 1  # no answer: ssh treats it as "no"
     out.write(answer.encode("utf-8") + b"\n")
     out.flush()
     return 0

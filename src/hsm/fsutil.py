@@ -1,9 +1,9 @@
-"""Operazioni su file privati: controllo dei permessi e scrittura atomica.
+"""Operations on private files: permission checks and atomic writes.
 
-Regola: i file di hsm sono 0600, le directory 0700, il proprietario è
-l'utente corrente e non sono symlink. Se una condizione non vale ci
-rifiutiamo di procedere e diciamo come correggere: non sistemiamo da soli,
-perché un permesso sbagliato può essere il segno di qualcosa da capire.
+Rule: hsm files are 0600, directories 0700, the owner is the current user
+and they are not symlinks. If a condition doesn't hold we refuse to go on
+and say how to fix it: we don't fix it ourselves, because a wrong
+permission can be the sign of something worth understanding.
 """
 
 import contextlib
@@ -18,116 +18,116 @@ from pathlib import Path
 
 from hsm.errors import HsmError, InsecurePermissionsError
 
-# Nessun file di hsm si avvicina a questa soglia: oltre, qualcosa non va e
-# non vogliamo caricarlo tutto in memoria.
+# No hsm file comes close to this threshold: beyond it, something is wrong
+# and we don't want to load it all into memory.
 MAX_READ_SIZE = 16 * 1024 * 1024
 
 
 def _verify(st: os.stat_result, path: Path) -> None:
-    """Applica la regola dei permessi a un risultato di stat già ottenuto."""
+    """Apply the permission rule to an already obtained stat result."""
     is_dir = stat.S_ISDIR(st.st_mode)
     if not (is_dir or stat.S_ISREG(st.st_mode)):
-        # FIFO, socket, device: aprirli può bloccare o avere effetti collaterali.
-        raise InsecurePermissionsError(f"{path} non è un file regolare né una directory.")
+        # FIFO, socket, device: opening them can block or have side effects.
+        raise InsecurePermissionsError(f"{path} is neither a regular file nor a directory.")
     if st.st_uid != os.getuid():
         raise InsecurePermissionsError(
-            f"{path} ha un proprietario diverso dall'utente corrente (uid {st.st_uid})."
+            f"{path} has an owner other than the current user (uid {st.st_uid})."
         )
     mode = stat.S_IMODE(st.st_mode)
-    # 0o077 = qualsiasi bit per gruppo o altri: devono essere tutti spenti.
+    # 0o077 = any bit for group or others: they must all be off.
     if mode & 0o077:
         wanted = "700" if is_dir else "600"
         raise InsecurePermissionsError(
-            f"Permessi troppo aperti su {path} ({mode:03o}). "
-            f"Correggi con: chmod {wanted} {path}"
+            f"Permissions too open on {path} ({mode:03o}). "
+            f"Fix with: chmod {wanted} {path}"
         )
 
 
 def check_private(path: Path) -> None:
-    """Verifica che `path` (file o directory) sia privato dell'utente.
+    """Check that `path` (file or directory) is private to the user.
 
-    Usa lstat, quindi un symlink viene rifiutato invece di essere seguito:
-    altrimenti un link potrebbe farci leggere o scrivere un file altrui.
-    Solleva FileNotFoundError se `path` non esiste.
+    Uses lstat, so a symlink is rejected instead of followed: otherwise a
+    link could make us read or write someone else's file.
+    Raises FileNotFoundError if `path` doesn't exist.
     """
     st = os.lstat(path)
     if stat.S_ISLNK(st.st_mode):
-        raise InsecurePermissionsError(f"{path} è un symlink: hsm richiede un file reale.")
+        raise InsecurePermissionsError(f"{path} is a symlink: hsm requires a real file.")
     _verify(st, path)
 
 
 def read_private(path: Path, max_size: int = MAX_READ_SIZE) -> bytes:
-    """Legge un file privato dopo averne verificato i permessi.
+    """Read a private file after checking its permissions.
 
-    Controlla anche la directory che lo contiene: un file 0600 in una
-    directory scrivibile da altri può essere rinominato o sostituito.
-    Il controllo sul file avviene sul file descriptor già aperto (fstat),
-    non sul nome: così non c'è una finestra tra controllo e lettura in cui
-    il file possa essere scambiato (race TOCTOU).
+    Also checks the containing directory: a 0600 file in a directory
+    writable by others can be renamed or replaced.
+    The check on the file is done on the already open file descriptor
+    (fstat), not on the name: this way there is no window between check and
+    read in which the file could be swapped (TOCTOU race).
     """
     check_private(path.parent)
-    # O_NOFOLLOW: fallisce se l'ultimo componente è un symlink.
-    # O_NONBLOCK: se al posto del file c'è una FIFO, open() non resta appeso
-    #   in attesa di uno scrittore; la rifiutiamo subito dopo con fstat.
-    # O_CLOEXEC: il descriptor non viene ereditato da ssh o altri figli.
+    # O_NOFOLLOW: fails if the last component is a symlink.
+    # O_NONBLOCK: if there is a FIFO in place of the file, open() doesn't hang
+    #   waiting for a writer; we reject it right after with fstat.
+    # O_CLOEXEC: the descriptor is not inherited by ssh or other children.
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
     try:
         fd = os.open(path, flags)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
             raise InsecurePermissionsError(
-                f"{path} è un symlink: hsm richiede un file reale."
+                f"{path} is a symlink: hsm requires a real file."
             ) from None
         raise
     with os.fdopen(fd, "rb") as f:
         st = os.fstat(f.fileno())
         _verify(st, path)
         if stat.S_ISDIR(st.st_mode):
-            raise InsecurePermissionsError(f"{path} è una directory, non un file.")
+            raise InsecurePermissionsError(f"{path} is a directory, not a file.")
         if st.st_size > max_size:
-            raise HsmError(f"{path} è troppo grande ({st.st_size} byte): file non valido.")
+            raise HsmError(f"{path} is too large ({st.st_size} bytes): invalid file.")
         return f.read()
 
 
 def ensure_private_dir(path: Path) -> None:
-    """Crea `path` con permessi 0700 se manca, poi ne verifica i permessi."""
-    # Il mode passato a makedirs vale solo per l'ultima directory creata;
-    # l'umask può solo togliere bit, quindi il risultato è al massimo 0700.
+    """Create `path` with 0700 permissions if missing, then check its permissions."""
+    # The mode passed to makedirs applies only to the last directory created;
+    # the umask can only remove bits, so the result is at most 0700.
     os.makedirs(path, mode=0o700, exist_ok=True)
     check_private(path)
 
 
 def _full_fsync(fd: int) -> None:
-    # Su macOS fsync() consegna i dati al disco ma non obbliga il disco a
-    # svuotare la sua cache; F_FULLFSYNC sì. Per il vault perdere una
-    # scrittura significa perdere tutte le password, quindi paghiamo il costo.
+    # On macOS fsync() hands the data to the disk but doesn't force the disk
+    # to flush its cache; F_FULLFSYNC does. For the vault, losing a write
+    # means losing all passwords, so we pay the cost.
     full_fsync = getattr(fcntl, "F_FULLFSYNC", None)
     if full_fsync is not None:
         try:
             fcntl.fcntl(fd, full_fsync)
             return
         except OSError:
-            # Alcuni filesystem (SMB, NFS, certi dischi esterni) non lo
-            # supportano: ripieghiamo su fsync, la garanzia migliore rimasta.
+            # Some filesystems (SMB, NFS, some external disks) don't
+            # support it: we fall back to fsync, the best guarantee left.
             pass
     os.fsync(fd)
 
 
 def atomic_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
-    """Scrive `data` in `path` in modo atomico e con permessi 0600.
+    """Write `data` to `path` atomically and with 0600 permissions.
 
-    Chi legge vede o il file vecchio intero o quello nuovo intero, mai uno
-    a metà, anche se il processo muore durante la scrittura:
-    1. mkstemp crea un file temporaneo nella stessa directory con O_EXCL e
-       permessi 0600 fin dalla creazione (nessun istante con permessi larghi);
-    2. scriviamo e forziamo i dati su disco;
-    3. pubblichiamo il file con il nome definitivo (operazione atomica sullo
-       stesso filesystem);
-    4. sincronizziamo la directory, perché è lei a registrare il nuovo nome.
+    A reader sees either the whole old file or the whole new one, never a
+    half-written one, even if the process dies during the write:
+    1. mkstemp creates a temporary file in the same directory with O_EXCL and
+       0600 permissions from creation (no instant with loose permissions);
+    2. we write and force the data to disk;
+    3. we publish the file under its final name (an atomic operation on the
+       same filesystem);
+    4. we sync the directory, because it is what records the new name.
 
-    Con `exclusive=True` il passo 3 usa os.link, che fallisce con
-    FileExistsError se `path` esiste già: serve a non sovrascrivere mai un
-    file creato nel frattempo da un altro processo.
+    With `exclusive=True` step 3 uses os.link, which fails with
+    FileExistsError if `path` already exists: it ensures we never overwrite a
+    file created in the meantime by another process.
     """
     directory = path.parent
     check_private(directory)
@@ -139,16 +139,16 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
             f.flush()
             _full_fsync(f.fileno())
         if exclusive:
-            # Crea un secondo nome per lo stesso file; il temporaneo viene
-            # rimosso nel finally, e resta solo `path`.
+            # Creates a second name for the same file; the temporary one is
+            # removed in the finally, and only `path` remains.
             os.link(tmp_name, path)
         else:
             os.replace(tmp_name, path)
             tmp_renamed = True
     finally:
         if not tmp_renamed:
-            # Errore a metà, o link riuscito: togliamo il nome temporaneo.
-            # Un'eventuale eccezione originale continua a propagarsi.
+            # Error halfway through, or link succeeded: remove the temporary name.
+            # Any original exception keeps propagating.
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(tmp_name)
     dir_fd = os.open(directory, os.O_RDONLY)
@@ -160,14 +160,14 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
 
 @contextlib.contextmanager
 def locked(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
-    """Lock esclusivo tra processi hsm, tenuto per tutta la durata del `with`.
+    """Exclusive lock between hsm processes, held for the whole `with` block.
 
-    Serve attorno a lettura-modifica-scrittura del vault: senza, due
-    `hsm pw set` in parallelo leggerebbero lo stesso file e il secondo
-    salvataggio cancellerebbe la modifica del primo.
-    flock è "consultivo": protegge solo da chi usa lo stesso lock, cioè da
-    altri hsm, che è quello che ci serve. Il lock sparisce con il processo,
-    quindi un crash non lascia file bloccati.
+    It wraps read-modify-write of the vault: without it, two parallel
+    `hsm pw set` would read the same file and the second save would erase
+    the first one's change.
+    flock is "advisory": it only protects against those using the same lock,
+    i.e. other hsm processes, which is what we need. The lock goes away with
+    the process, so a crash doesn't leave files locked.
     """
     check_private(path.parent)
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -175,7 +175,7 @@ def locked(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
         fd = os.open(path, flags, 0o600)
     except OSError as exc:
         if exc.errno == errno.ELOOP:
-            raise InsecurePermissionsError(f"{path} è un symlink: hsm richiede un file reale.") from None
+            raise InsecurePermissionsError(f"{path} is a symlink: hsm requires a real file.") from None
         raise
     try:
         _verify(os.fstat(fd), path)
@@ -187,9 +187,9 @@ def locked(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     raise HsmError(
-                        f"Un altro hsm sta modificando il vault ({path}): riprova tra poco."
+                        f"Another hsm is modifying the vault ({path}): try again shortly."
                     ) from None
                 time.sleep(0.1)
         yield
     finally:
-        os.close(fd)  # chiudere il descriptor rilascia il lock
+        os.close(fd)  # closing the descriptor releases the lock

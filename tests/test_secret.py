@@ -14,7 +14,7 @@ def test_repr_str_format_are_redacted() -> None:
 
 
 def test_redacted_inside_containers() -> None:
-    # Nei traceback e nei debug print i Secret finiscono spesso dentro dict/list.
+    # In tracebacks and debug prints, Secrets often end up inside dicts/lists.
     rendered = repr({"pw": Secret(bytearray(b"hunter2"))})
     assert "hunter2" not in rendered
 
@@ -91,13 +91,13 @@ def test_not_hashable() -> None:
 
 
 def test_view_of_temporary_secret_keeps_its_content() -> None:
-    # Regressione: __del__ azzerava il buffer quando il Secret temporaneo
-    # veniva distrutto, mentre la sua view era ancora in uso. Risultato:
-    # zeri al posto della chiave, senza nessun errore.
+    # Regression: __del__ zeroed the buffer when the temporary Secret was
+    # destroyed while its view was still in use. Result: zeros instead of
+    # the key, with no error at all.
     def make() -> Secret:
         return Secret(bytearray(b"abc"))
 
-    # Fuori dall'assert: la riscrittura degli assert di pytest tiene vivi i
-    # valori intermedi e nasconderebbe il bug.
+    # Outside the assert: pytest's assert rewriting keeps intermediate
+    # values alive and would hide the bug.
     content = bytes(make().view())
     assert content == b"abc"

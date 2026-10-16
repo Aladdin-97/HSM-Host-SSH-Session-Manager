@@ -1,40 +1,40 @@
-"""Inventario degli host in ~/.config/hsm/hosts.toml (in chiaro, senza segreti).
+"""Host inventory in ~/.config/hsm/hosts.toml (plaintext, no secrets).
 
-Formato, una tabella per host:
+Format, one table per host:
 
     [hosts.web01]
     hostname = "10.0.0.1"
     user = "deploy"
-    port = 2222                      # omesso se 22
+    port = 2222                      # omitted if 22
     tags = ["prod", "web"]
-    jump_host = "bastion"            # alias hsm oppure [user@]host[:port]
+    jump_host = "bastion"            # hsm alias or [user@]host[:port]
     identity_file = "~/.ssh/id_ed25519"
-    note = "frontend principale"
-    auth = "password"                # omesso se "key" (il default)
+    note = "main frontend"
+    auth = "password"                # omitted if "key" (the default)
 
-`auth` dice solo COME ci si autentica, mai con cosa: serve a `hsm connect`
-per sapere se aprire il vault senza dover chiedere il Touch ID per gli
-host che usano la chiave SSH. Lo impostano `hsm pw set` / `hsm pw rm`.
+`auth` only says HOW to authenticate, never with what: `hsm connect` uses it
+to know whether to open the vault, so it doesn't ask for Touch ID for hosts
+that use an SSH key. It is set by `hsm pw set` / `hsm pw rm`.
 
-Due scelte che contano:
+Choices that matter:
 
-- Validazione stretta di ogni campo. hostname, user e jump_host finiscono
-  negli argomenti di ssh e in ~/.ssh/config: un hostname come
-  "-oProxyCommand=..." verrebbe letto da ssh come un'opzione ed eseguirebbe
-  un comando; un a capo in un valore aggiungerebbe righe arbitrarie a
-  ssh_config; `jump_host = "none"` disattiverebbe il bastion in silenzio.
-  Per questo gli host vengono analizzati (indirizzo IP via `ipaddress`,
-  oppure nome DNS etichetta per etichetta) invece di essere solo filtrati
-  per caratteri. Il controllo sta in Host, quindi vale sia per i valori
-  letti dal file sia per quelli passati da riga di comando.
+- Strict validation of every field. hostname, user and jump_host end up
+  in ssh arguments and in ~/.ssh/config: a hostname like
+  "-oProxyCommand=..." would be read by ssh as an option and run a
+  command; a newline in a value would add arbitrary lines to
+  ssh_config; `jump_host = "none"` would silently disable the bastion.
+  That is why hosts are parsed (IP address via `ipaddress`, or DNS name
+  label by label) instead of just being filtered by character. The check
+  lives in Host, so it applies both to values read from the file and to
+  those passed on the command line.
 
-- Gli alias sono unici senza distinguere maiuscole (come fa ssh con i
-  pattern Host) e non possono coincidere con l'hostname di un altro host:
-  "Host 10.0.0.1" catturerebbe chi digita `ssh 10.0.0.1`.
+- Aliases are unique case-insensitively (as ssh does with Host patterns)
+  and cannot match another host's hostname: "Host 10.0.0.1" would capture
+  anyone typing `ssh 10.0.0.1`.
 
-- tomlkit invece di tomllib: tomllib sa solo leggere, e riscrivere il file
-  con un serializzatore qualsiasi cancellerebbe i commenti scritti a mano.
-  tomlkit modifica il documento sul posto e conserva tutto il resto.
+- tomlkit instead of tomllib: tomllib can only read, and rewriting the file
+  with an arbitrary serializer would erase hand-written comments.
+  tomlkit edits the document in place and preserves everything else.
 """
 
 import dataclasses
@@ -55,44 +55,44 @@ from hsm.fsutil import atomic_write, ensure_private_dir, read_private
 DEFAULT_PORT = 22
 AUTH_METHODS = ("key", "password")
 
-# Alias: finisce nella riga "Host <alias>" di ssh_config, dove spazi e
-# caratteri jolly (*, ?, !) cambierebbero il significato.
+# Alias: ends up in the "Host <alias>" line of ssh_config, where spaces and
+# wildcards (*, ?, !) would change its meaning.
 _ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
-# Un'etichetta DNS: niente "-" all'inizio o alla fine. "_" ammesso perché
-# compare in nomi interni reali, anche se non è standard.
+# A DNS label: no "-" at the start or end. "_" is allowed because it
+# appears in real internal names, even though it isn't standard.
 _DNS_LABEL_RE = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
 _USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,31}")
 _PORT_RE = re.compile(r"[0-9]{1,5}")
-# Zona IPv6 (il nome di un'interfaccia, es. en0). ipaddress ne accetta
-# qualsiasi; noi solo caratteri che ssh_config legge senza sorprese.
+# IPv6 zone (an interface name, e.g. en0). ipaddress accepts any;
+# we only accept characters that ssh_config reads without surprises.
 _ZONE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}")
 
 
 def is_valid_alias(alias: object) -> bool:
-    """True se `alias` può essere usato come alias hsm (e come Host in ssh_config)."""
+    """True if `alias` can be used as an hsm alias (and as Host in ssh_config)."""
     return isinstance(alias, str) and _ALIAS_RE.fullmatch(alias) is not None
 
 
 class InventoryError(HsmError):
-    """hosts.toml non valido o operazione impossibile sull'inventario."""
+    """Invalid hosts.toml or impossible operation on the inventory."""
 
 
 class InvalidHostError(InventoryError):
-    """Un campo di un host non rispetta le regole di validazione."""
+    """A host field does not satisfy the validation rules."""
 
 
 class HostNotFound(InventoryError):
-    """Nessun host con questo alias."""
+    """No host with this alias."""
 
 
 class HostExistsError(InventoryError):
-    """Esiste già un host con questo alias."""
+    """A host with this alias already exists."""
 
 
 @dataclass(frozen=True)
 class Host:
-    """Un host dell'inventario. La validazione avviene alla costruzione."""
+    """An inventory host. Validation happens at construction."""
 
     alias: str
     hostname: str
@@ -107,27 +107,27 @@ class Host:
     def __post_init__(self) -> None:
         if not is_valid_alias(self.alias):
             raise InvalidHostError(
-                f"alias non valido: {self.alias!r} (lettere, cifre, '.', '_', '-'; "
-                "deve iniziare con lettera o cifra)"
+                f"invalid alias: {self.alias!r} (letters, digits, '.', '_', '-'; "
+                "must start with a letter or digit)"
             )
-        # La zona IPv6 (fe80::1%en0) è ammessa solo qui; chi scrive
-        # ssh_config deve raddoppiare il "%", che lì viene espanso.
+        # The IPv6 zone (fe80::1%en0) is allowed only here; whoever writes
+        # ssh_config must double the "%", which is expanded there.
         if not isinstance(self.hostname, str) or not (
             _is_ip(self.hostname, allow_zone=True) or _is_dns_name(self.hostname)
         ):
             self._fail("hostname", self.hostname)
         if self.user is not None:
             self._check("user", _USER_RE, self.user)
-        # bool è una sottoclasse di int: True varrebbe porta 1.
+        # bool is a subclass of int: True would mean port 1.
         if not isinstance(self.port, int) or isinstance(self.port, bool) or not 1 <= self.port <= 65535:
             self._fail("port", self.port)
-        # Una stringa è iterabile: tuple("web") darebbe ("w", "e", "b").
+        # A string is iterable: tuple("web") would give ("w", "e", "b").
         if not isinstance(self.tags, (list, tuple)):
             self._fail("tags", self.tags)
         tags = tuple(self.tags)
         for tag in tags:
             self._check("tag", _TAG_RE, tag)
-        # Ordinati e senza doppioni: confronti e output stabili.
+        # Sorted and deduplicated: stable comparisons and output.
         object.__setattr__(self, "tags", tuple(sorted(set(tags))))
         if self.jump_host is not None and not _is_jump(self.jump_host):
             self._fail("jump_host", self.jump_host)
@@ -137,17 +137,17 @@ class Host:
                 not isinstance(ident, str)
                 or not ident
                 or not ident.strip()
-                # Assoluto o relativo alla home: un percorso relativo
-                # dipenderebbe dalla directory da cui si lancia hsm.
+                # Absolute or relative to home: a relative path would
+                # depend on the directory hsm is launched from.
                 or not ident.startswith(("/", "~"))
-                # In ssh_config lo scriviamo tra virgolette: lì '"' chiude,
-                # "\" fa da escape, "%x" e "${VAR}" vengono espansi.
+                # In ssh_config we write it in quotes: there '"' closes,
+                # "\" escapes, "%x" and "${VAR}" are expanded.
                 or any(c in ident for c in '"\\%$')
                 or not ident.isprintable()
             ):
                 self._fail("identity_file", ident)
         if self.note is not None and (not isinstance(self.note, str) or not self.note.isprintable()):
-            # isprintable() esclude a capo e sequenze di escape del terminale.
+            # isprintable() rules out newlines and terminal escape sequences.
             self._fail("note", self.note)
         if self.auth not in AUTH_METHODS:
             self._fail("auth", self.auth)
@@ -157,7 +157,7 @@ class Host:
             self._fail(field, value)
 
     def _fail(self, field: str, value: object) -> None:
-        raise InvalidHostError(f"Host {self.alias}: {field} non valido: {value!r}")
+        raise InvalidHostError(f"Host {self.alias}: invalid {field}: {value!r}")
 
 
 def _is_ip(value: str, *, allow_zone: bool) -> bool:
@@ -179,7 +179,7 @@ def _is_dns_name(value: str) -> bool:
 
 
 def _is_jump(value: object) -> bool:
-    """Valida un singolo salto `[user@]host[:port]`, con IPv6 tra [ ]."""
+    """Validate a single `[user@]host[:port]` hop, with IPv6 inside [ ]."""
     if not isinstance(value, str):
         return False
     user, at, rest = value.partition("@")
@@ -201,10 +201,10 @@ def _is_jump(value: object) -> bool:
     else:
         host, colon, port_text = rest.partition(":")
         port = port_text if colon else None
-        # Un IPv6 senza parentesi è ambiguo con ":porta": va scritto tra [ ].
+        # An unbracketed IPv6 is ambiguous with ":port": it must be written inside [ ].
         if not (_is_ip(host, allow_zone=False) and ":" not in host) and not _is_dns_name(host):
             return False
-        # "none" ha un significato speciale per ProxyJump/-J: nessun salto.
+        # "none" has a special meaning for ProxyJump/-J: no hop.
         if host.lower() == "none":
             return False
     if port is not None and not (_PORT_RE.fullmatch(port) and 1 <= int(port) <= 65535):
@@ -213,21 +213,21 @@ def _is_jump(value: object) -> bool:
 
 
 _FIELDS = tuple(f.name for f in fields(Host))
-# Tipo atteso in hosts.toml per ogni campo, per messaggi d'errore chiari.
+# Expected type in hosts.toml for each field, for clear error messages.
 _FILE_TYPES: dict[str, tuple[type, str]] = {
-    "hostname": (str, "una stringa"),
-    "user": (str, "una stringa"),
-    "port": (int, "un intero"),
-    "tags": (list, "una lista di stringhe"),
-    "jump_host": (str, "una stringa"),
-    "identity_file": (str, "una stringa"),
-    "note": (str, "una stringa"),
-    "auth": (str, '"key" o "password"'),
+    "hostname": (str, "a string"),
+    "user": (str, "a string"),
+    "port": (int, "an integer"),
+    "tags": (list, "a list of strings"),
+    "jump_host": (str, "a string"),
+    "identity_file": (str, "a string"),
+    "note": (str, "a string"),
+    "auth": (str, '"key" or "password"'),
 }
 
 
 class Inventory:
-    """L'inventario caricato da un file, modificabile e salvabile."""
+    """The inventory loaded from a file, editable and saveable."""
 
     def __init__(self, path: Path, doc: TOMLDocument, hosts: dict[str, Host]) -> None:
         self._path = path
@@ -236,7 +236,7 @@ class Inventory:
 
     @classmethod
     def load(cls, path: Path) -> "Inventory":
-        """Legge e valida `path`. Se il file non esiste, inventario vuoto."""
+        """Read and validate `path`. If the file doesn't exist, empty inventory."""
         try:
             raw = read_private(path)
         except FileNotFoundError:
@@ -244,12 +244,12 @@ class Inventory:
         try:
             doc = tomlkit.parse(raw.decode("utf-8"))
         except (TOMLKitError, UnicodeDecodeError) as exc:
-            raise InventoryError(f"{path}: TOML non valido ({exc})") from None
+            raise InventoryError(f"{path}: invalid TOML ({exc})") from None
         section = doc.get("hosts")
         if section is None:
             return cls(path, doc, {})
         if not isinstance(section, Mapping):
-            raise InventoryError(f"{path}: 'hosts' deve essere una tabella")
+            raise InventoryError(f"{path}: 'hosts' must be a table")
         hosts: dict[str, Host] = {}
         for alias, data in section.unwrap().items():
             host = _host_from_file(str(alias), data)
@@ -258,7 +258,7 @@ class Inventory:
         return cls(path, doc, hosts)
 
     def hosts(self, tag: str | None = None) -> list[Host]:
-        """Gli host ordinati per alias, eventualmente filtrati per tag."""
+        """Hosts sorted by alias, optionally filtered by tag."""
         return [
             h for _, h in sorted(self._hosts.items()) if tag is None or tag in h.tags
         ]
@@ -267,13 +267,13 @@ class Inventory:
         try:
             return self._hosts[alias]
         except KeyError:
-            raise HostNotFound(f"Nessun host con alias {alias!r}.") from None
+            raise HostNotFound(f"No host with alias {alias!r}.") from None
 
     def add(self, host: Host) -> None:
         _check_conflicts(host, self._hosts, replacing=None)
         if "hosts" not in self._doc:
-            # Super-table: nel file compare solo [hosts.<alias>], senza un
-            # [hosts] vuoto sopra.
+            # Super-table: only [hosts.<alias>] appears in the file, without
+            # an empty [hosts] above it.
             self._doc["hosts"] = tomlkit.table(is_super_table=True)
         table = tomlkit.table()
         for key, value in _to_file(host).items():
@@ -283,12 +283,12 @@ class Inventory:
         self._hosts[host.alias] = host
 
     def update(self, host: Host) -> None:
-        """Sostituisce i campi di un host esistente, conservando i commenti."""
+        """Replace the fields of an existing host, preserving comments."""
         self.get(host.alias)
         _check_conflicts(host, self._hosts, replacing=host.alias)
         table = self._doc["hosts"][host.alias]  # type: ignore[index]
-        # Modifica chiave per chiave invece di sostituire la tabella: così
-        # i commenti e l'ordine delle righe non toccate restano dove sono.
+        # Edit key by key instead of replacing the table: this way comments
+        # and the order of untouched lines stay where they are.
         for key, value in _to_file(host).items():
             if value is None:
                 if key in table:
@@ -298,23 +298,23 @@ class Inventory:
         self._hosts[host.alias] = host
 
     def rename(self, old: str, new: str) -> list[str]:
-        """Cambia l'alias di un host. Restituisce gli host il cui jump_host è stato aggiornato.
+        """Change a host's alias. Return the hosts whose jump_host was updated.
 
-        Gli host che usavano `old` come jump_host vengono aggiornati: lasciarli
-        così li farebbe risolvere via DNS, magari verso un'altra macchina.
-        Il confronto ignora le maiuscole, come fa la risoluzione dei jump.
-        Tutti i controlli avvengono prima di modificare qualsiasi cosa.
+        Hosts that used `old` as jump_host are updated: leaving them as they
+        are would make them resolve via DNS, possibly to another machine.
+        The comparison ignores case, as jump resolution does.
+        All checks happen before anything is modified.
         """
         host = self.get(old)
-        renamed = dataclasses.replace(host, alias=new)  # rivalida il nuovo alias
+        renamed = dataclasses.replace(host, alias=new)  # revalidates the new alias
         _check_conflicts(renamed, self._hosts, replacing=old)
         dependents = sorted(
             h.alias
             for h in self._hosts.values()
             if h.alias != old and h.jump_host is not None and h.jump_host.casefold() == old.casefold()
         )
-        # La tabella viene spostata, non ricreata: i commenti al suo interno
-        # restano. Nel file finisce in fondo alla sezione [hosts].
+        # The table is moved, not recreated: the comments inside it are
+        # kept. In the file it ends up at the bottom of the [hosts] section.
         section = self._doc["hosts"]
         table = section[old]  # type: ignore[index]
         del section[old]  # type: ignore[union-attr]
@@ -326,30 +326,30 @@ class Inventory:
         return dependents
 
     def remove(self, alias: str, *, force: bool = False) -> Host:
-        """Toglie un host. Se altri lo usano come jump_host serve `force`.
+        """Remove a host. If others use it as jump_host, `force` is required.
 
-        Senza il blocco "Host <alias>" in ssh_config, un jump_host rimasto
-        orfano verrebbe risolto via DNS: magari verso una macchina diversa.
+        Without the "Host <alias>" block in ssh_config, an orphaned jump_host
+        would be resolved via DNS: possibly to a different machine.
         """
         host = self.get(alias)
         users = self.referenced_by(alias)
         if users and not force:
             raise InventoryError(
-                f"{alias} è il jump_host di: {', '.join(users)}. "
-                "Aggiorna quegli host o rimuovi forzando."
+                f"{alias} is the jump_host of: {', '.join(users)}. "
+                "Update those hosts or force the removal."
             )
         del self._doc["hosts"][alias]  # type: ignore[union-attr]
         del self._hosts[alias]
         return host
 
     def referenced_by(self, alias: str) -> list[str]:
-        """Alias degli host che usano `alias` come jump_host."""
+        """Aliases of the hosts that use `alias` as jump_host."""
         return sorted(h.alias for h in self._hosts.values() if h.jump_host == alias)
 
     def save(self, *, dry_run: bool = False) -> str:
-        """Scrive il file (0600, atomico) e restituisce il testo prodotto.
+        """Write the file (0600, atomic) and return the text produced.
 
-        Con `dry_run` non scrive nulla: il chiamante può mostrare il testo.
+        With `dry_run` nothing is written: the caller can show the text.
         """
         text = tomlkit.dumps(self._doc)
         if not dry_run:
@@ -359,40 +359,40 @@ class Inventory:
 
 
 def _check_conflicts(host: Host, hosts: dict[str, Host], *, replacing: str | None) -> None:
-    """Alias unici senza maiuscole, e mai uguali all'hostname di un altro."""
+    """Aliases unique case-insensitively, and never equal to another host's hostname."""
     alias = host.alias.casefold()
     for other in hosts.values():
         if other.alias == replacing:
             continue
         if other.alias.casefold() == alias:
             raise HostExistsError(
-                f"Esiste già un host con alias {other.alias!r} "
-                f"(ssh non distingue maiuscole: {host.alias!r} coinciderebbe)."
+                f"A host with alias {other.alias!r} already exists "
+                f"(ssh is case-insensitive: {host.alias!r} would collide)."
             )
         if other.hostname.casefold() == alias:
             raise InventoryError(
-                f"L'alias {host.alias!r} coincide con l'hostname di {other.alias!r}: "
-                f"`ssh {other.hostname}` finirebbe su {host.hostname}."
+                f"Alias {host.alias!r} matches the hostname of {other.alias!r}: "
+                f"`ssh {other.hostname}` would end up on {host.hostname}."
             )
         if other.alias.casefold() == host.hostname.casefold():
             raise InventoryError(
-                f"L'hostname {host.hostname!r} coincide con l'alias {other.alias!r}: "
-                "ssh applicherebbe le impostazioni di quell'host."
+                f"Hostname {host.hostname!r} matches the alias {other.alias!r}: "
+                "ssh would apply that host's settings."
             )
 
 
 def _host_from_file(alias: str, data: Any) -> Host:
     if not isinstance(data, Mapping):
-        raise InventoryError(f"Host {alias}: deve essere una tabella")
+        raise InventoryError(f"Host {alias}: must be a table")
     unknown = sorted(set(data) - set(_FIELDS))
     if unknown:
-        raise InventoryError(f"Host {alias}: campo sconosciuto {', '.join(unknown)}")
+        raise InventoryError(f"Host {alias}: unknown field {', '.join(unknown)}")
     if "hostname" not in data:
-        raise InventoryError(f"Host {alias}: manca hostname")
+        raise InventoryError(f"Host {alias}: missing hostname")
     for key, value in data.items():
         expected, description = _FILE_TYPES[key]
         if not isinstance(value, expected) or isinstance(value, bool):
-            raise InventoryError(f"Host {alias}: {key} deve essere {description}")
+            raise InventoryError(f"Host {alias}: {key} must be {description}")
     try:
         return Host(alias=alias, **{k: _from_toml(k, v) for k, v in data.items()})
     except InvalidHostError as exc:
@@ -404,7 +404,7 @@ def _from_toml(key: str, value: Any) -> Any:
 
 
 def _to_file(host: Host) -> dict[str, Any]:
-    """I campi da scrivere; None significa "chiave assente dal file"."""
+    """The fields to write; None means "key absent from the file"."""
     return {
         "hostname": host.hostname,
         "user": host.user,

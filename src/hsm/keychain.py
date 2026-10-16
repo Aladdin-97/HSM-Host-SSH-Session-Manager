@@ -1,18 +1,18 @@
-"""Memorizza la chiave del vault nel login keychain di macOS via /usr/bin/security.
+"""Stores the vault key in the macOS login keychain via /usr/bin/security.
 
-Cosa salviamo: la chiave derivata da Argon2id (32 byte, in esadecimale), non
-la master password. Se l'item venisse letto, chi lo legge apre il vault ma
-non scopre una password che potresti riusare altrove; in più gli unlock
-successivi saltano Argon2.
+What we store: the key derived by Argon2id (32 bytes, in hex), not the
+master password. If the item were read, the reader could open the vault but
+would not learn a password you might reuse elsewhere; on top of that,
+subsequent unlocks skip Argon2.
 
-Dove: un "generic password" con service `hsm` e account = `vault.key_id()`,
-cioè un hash del salt. Dopo un rekey il salt cambia, quindi l'item vecchio
-non viene più cercato (e unlock lo cancella).
+Where: a "generic password" with service `hsm` and account = `vault.key_id()`,
+i.e. a hash of the salt. After a rekey the salt changes, so the old item is
+no longer looked up (and unlock deletes it).
 
-Cosa NON fa questo modulo: non protegge l'item con la biometria. Un item
-creato da `security` è leggibile senza prompt da qualunque processo che giri
-come il tuo utente e invochi `security`. Il Touch ID davanti alla lettura
-(touchid.py) è un controllo d'interfaccia, non un confine di sicurezza.
+What this module does NOT do: it doesn't protect the item with biometrics.
+An item created by `security` can be read without a prompt by any process
+running as your user that invokes `security`. The Touch ID in front of the
+read (touchid.py) is a UI check, not a security boundary.
 """
 
 import binascii
@@ -28,44 +28,44 @@ SECURITY = "/usr/bin/security"
 SERVICE = "hsm"
 LABEL = "hsm-vault-key"
 
-# `security` esce con 44 quando l'item non esiste (errSecItemNotFound).
+# `security` exits with 44 when the item doesn't exist (errSecItemNotFound).
 _EXIT_NOT_FOUND = 44
 
-# Il keychain può mostrare un dialog (keychain bloccato): diamo tempo
-# all'utente di rispondere, ma non restiamo appesi per sempre.
+# The keychain can show a dialog (locked keychain): we give the user time
+# to answer, but we don't hang forever.
 _TIMEOUT_S = 60
 
-# Service e account finiscono nella riga che `security -i` interpreta come
-# comando: ammettiamo solo caratteri che non possono aprire nuove opzioni
-# (niente "-" iniziale), spezzare argomenti (spazi) o comandi (a capo).
+# Service and account end up in the line that `security -i` parses as a
+# command: we only allow characters that can't start new options
+# (no leading "-"), split arguments (spaces) or commands (newlines).
 _KEY_ID_RE = re.compile(r"[0-9a-f]{1,64}")
 _SERVICE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
-# Esattamente ciò che scriviamo noi: 64 cifre esadecimali minuscole. Più
-# rigido di bytearray.fromhex, che tollera spazi e maiuscole.
+# Exactly what we write: 64 lowercase hex digits. Stricter than
+# bytearray.fromhex, which tolerates spaces and uppercase.
 _HEX_KEY_RE = re.compile(rb"[0-9a-f]{%d}" % (2 * KEY_SIZE))
 
-# Quanto di stderr riportiamo all'utente.
+# How much of stderr we report to the user.
 _MAX_REASON = 200
 
 Runner = Callable[[Sequence[str], bytes | bytearray | None], subprocess.CompletedProcess[bytes]]
 
 
 class KeychainError(HsmError):
-    """Il Keychain ha risposto con un errore."""
+    """The Keychain responded with an error."""
 
 
 class KeychainUnavailable(KeychainError):
-    """Il Keychain non è utilizzabile su questo sistema."""
+    """The Keychain is not usable on this system."""
 
 
 def _run(
     argv: Sequence[str], stdin: bytes | bytearray | None
 ) -> subprocess.CompletedProcess[bytes]:
-    # Niente shell: argv va al processo così com'è, senza interpretazione.
+    # No shell: argv goes to the process as is, without interpretation.
     if stdin is None:
-        # Senza input chiudiamo stdin: `security` non deve poter leggere (o
-        # restare in attesa di) ciò che l'utente digita nel terminale.
+        # Without input we close stdin: `security` must not be able to read
+        # (or wait for) what the user types in the terminal.
         return subprocess.run(
             list(argv),
             stdin=subprocess.DEVNULL,
@@ -79,32 +79,32 @@ def _run(
 
 
 class Keychain:
-    """Accesso alla chiave del vault salvata nel login keychain."""
+    """Access to the vault key stored in the login keychain."""
 
     def __init__(
         self, service: str = SERVICE, *, security: str = SECURITY, runner: Runner = _run
     ) -> None:
         if not _SERVICE_RE.fullmatch(service):
-            raise ValueError(f"Nome di service non valido: {service!r}")
+            raise ValueError(f"Invalid service name: {service!r}")
         self._service = service
         self._security = security
         self._runner = runner
 
     def store_key(self, key_id: str, key: Secret) -> None:
-        """Salva (o aggiorna) la chiave del vault identificata da `key_id`."""
+        """Store (or update) the vault key identified by `key_id`."""
         _check_key_id(key_id)
         if len(key) != KEY_SIZE:
-            raise ValueError(f"La chiave deve essere di {KEY_SIZE} byte")
-        # `security add-generic-password -w <segreto>` metterebbe il segreto
-        # nella riga di comando, leggibile da chiunque con `ps`. Con `-i`
-        # security legge i comandi da stdin, e stdin è privato del processo.
-        # -U aggiorna l'item se esiste già invece di fallire.
+            raise ValueError(f"The key must be {KEY_SIZE} bytes")
+        # `security add-generic-password -w <secret>` would put the secret
+        # on the command line, readable by anyone with `ps`. With `-i`
+        # security reads commands from stdin, and stdin is private to the process.
+        # -U updates the item if it already exists instead of failing.
         command = bytearray(
             f"add-generic-password -U -s {self._service} -a {key_id} -l {LABEL} -w ".encode()
         )
-        # Azzeramento "best effort": hexlify produce comunque una copia
-        # immutabile della chiave in esadecimale, che non possiamo cancellare.
-        # Passiamo il bytearray così com'è per non crearne un'altra.
+        # "Best effort" zeroing: hexlify still produces an immutable hex copy
+        # of the key, which we cannot erase.
+        # We pass the bytearray as is so as not to create another one.
         command += binascii.hexlify(key.view())
         command += b"\n"
         try:
@@ -112,48 +112,48 @@ class Keychain:
         finally:
             command[:] = bytes(len(command))
         if result.returncode != 0:
-            # Volutamente senza stderr: in modalità -i potrebbe riportare
-            # pezzi del comando, e il comando contiene la chiave.
+            # Deliberately without stderr: in -i mode it could echo parts
+            # of the command, and the command contains the key.
             raise KeychainError(
-                f"Impossibile salvare la chiave nel Keychain (codice {result.returncode})."
+                f"Unable to store the key in the Keychain (code {result.returncode})."
             )
 
     def load_key(self, key_id: str) -> Secret | None:
-        """Restituisce la chiave salvata, o None se l'item non esiste."""
+        """Return the stored key, or None if the item doesn't exist."""
         _check_key_id(key_id)
-        # -w stampa solo il segreto su stdout, che leggiamo via pipe.
+        # -w prints only the secret on stdout, which we read via a pipe.
         result = self._call(["find-generic-password", "-s", self._service, "-a", key_id, "-w"])
         if result.returncode == _EXIT_NOT_FOUND:
             return None
         if result.returncode != 0:
-            raise KeychainError(f"Lettura dal Keychain fallita: {_reason(result)}")
+            raise KeychainError(f"Keychain read failed: {_reason(result)}")
         out = result.stdout
-        if out.endswith(b"\n"):  # security aggiunge un solo a capo finale
+        if out.endswith(b"\n"):  # security adds a single trailing newline
             out = out[:-1]
         if not _HEX_KEY_RE.fullmatch(out):
-            raise KeychainError("Item del Keychain non valido: formato inatteso.")
-        # stdout (bytes immutabili) resta in memoria fino al GC: limite noto.
+            raise KeychainError("Invalid Keychain item: unexpected format.")
+        # stdout (immutable bytes) stays in memory until GC: known limitation.
         return Secret(bytearray.fromhex(out.decode("ascii")))
 
     def has_key(self, key_id: str) -> bool:
-        """True se l'item esiste. Non legge il segreto (niente -w), quindi
-        nessun prompt e nessun dato sensibile in uscita: serve a `hsm paths`."""
+        """True if the item exists. Doesn't read the secret (no -w), so no
+        prompt and no sensitive data in the output: used by `hsm paths`."""
         _check_key_id(key_id)
         result = self._call(["find-generic-password", "-s", self._service, "-a", key_id])
         if result.returncode == _EXIT_NOT_FOUND:
             return False
         if result.returncode != 0:
-            raise KeychainError(f"Lettura dal Keychain fallita: {_reason(result)}")
+            raise KeychainError(f"Keychain read failed: {_reason(result)}")
         return True
 
     def delete_key(self, key_id: str) -> bool:
-        """Cancella l'item. True se esisteva, False se non c'era."""
+        """Delete the item. True if it existed, False if it wasn't there."""
         _check_key_id(key_id)
         result = self._call(["delete-generic-password", "-s", self._service, "-a", key_id])
         if result.returncode == _EXIT_NOT_FOUND:
             return False
         if result.returncode != 0:
-            raise KeychainError(f"Cancellazione dal Keychain fallita: {_reason(result)}")
+            raise KeychainError(f"Keychain deletion failed: {_reason(result)}")
         return True
 
     def _call(
@@ -163,33 +163,33 @@ class Keychain:
             return self._runner([self._security, *args], stdin)
         except FileNotFoundError:
             raise KeychainUnavailable(
-                f"{self._security} non trovato: Keychain non disponibile."
+                f"{self._security} not found: Keychain unavailable."
             ) from None
         except subprocess.TimeoutExpired:
-            msg = f"Il Keychain non ha risposto entro {_TIMEOUT_S} s."
+            msg = f"The Keychain did not respond within {_TIMEOUT_S} s."
             if writing:
-                # Il processo è stato ucciso a metà: l'item potrebbe essere
-                # stato scritto oppure no.
-                msg += " Lo stato dell'item è incerto: verrà riscritto al prossimo unlock."
+                # The process was killed halfway: the item may or may not
+                # have been written.
+                msg += " The item's state is uncertain: it will be rewritten on the next unlock."
             raise KeychainError(msg) from None
         except (OSError, subprocess.SubprocessError) as exc:
-            # Binario non eseguibile, fork fallita, ecc. Tutto diventa
-            # KeychainError, così unlock può sempre ripiegare sulla password.
+            # Binary not executable, fork failed, etc. Everything becomes
+            # KeychainError, so unlock can always fall back to the password.
             raise KeychainError(
-                f"Impossibile eseguire {self._security} ({type(exc).__name__})."
+                f"Unable to run {self._security} ({type(exc).__name__})."
             ) from None
 
 
 def _check_key_id(key_id: str) -> None:
     if not _KEY_ID_RE.fullmatch(key_id):
-        raise ValueError(f"key_id non valido: {key_id!r}")
+        raise ValueError(f"Invalid key_id: {key_id!r}")
 
 
 def _reason(result: subprocess.CompletedProcess[bytes]) -> str:
-    """Prima riga di stderr, utile all'utente (es. "User interaction is not allowed")."""
+    """First line of stderr, useful to the user (e.g. "User interaction is not allowed")."""
     lines = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
     if not lines:
-        return f"codice {result.returncode}"
-    # stderr è testo esterno che finisce sul terminale: togliamo i caratteri
-    # di controllo (es. sequenze ANSI) e tagliamo le righe troppo lunghe.
+        return f"code {result.returncode}"
+    # stderr is external text that ends up on the terminal: we strip control
+    # characters (e.g. ANSI sequences) and truncate overly long lines.
     return "".join(c for c in lines[0] if c.isprintable())[:_MAX_REASON]

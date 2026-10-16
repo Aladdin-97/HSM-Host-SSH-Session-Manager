@@ -1,25 +1,25 @@
 [project]
 name = "hsm"
 version = "0.1.0"
-description = "Inventario di host SSH con vault cifrato, per macOS"
+description = "SSH host inventory with an encrypted vault, for macOS"
 requires-python = ">=3.12"
 dependencies = [
-    # AES-GCM e Argon2id (nativo da 44.0: niente argon2-cffi).
+    # AES-GCM and Argon2id (native since 44.0: no argon2-cffi needed).
     "cryptography>=44",
-    # Controllo Touch ID (LAContext): non esiste un comando di sistema
-    # equivalente, e scriverne un binding ctypes a mano sarebbe più fragile.
+    # Touch ID check (LAContext): there is no equivalent system command,
+    # and a hand-written ctypes binding would be more fragile.
     "pyobjc-framework-localauthentication>=11 ; sys_platform == 'darwin'",
-    # NSPasteboard per gli appunti: a differenza di pbcopy permette di marcare
-    # la password come "da non salvare in cronologia". Già richiesto da
-    # LocalAuthentication: dichiararlo non aggiunge pacchetti.
+    # NSPasteboard for the clipboard: unlike pbcopy, it can mark the password
+    # as "do not keep in clipboard history". Already required by
+    # LocalAuthentication: declaring it adds no packages.
     "pyobjc-framework-cocoa>=11 ; sys_platform == 'darwin'",
-    # Legge/scrive hosts.toml preservando i commenti scritti a mano.
+    # Reads/writes hosts.toml preserving hand-written comments.
     "tomlkit>=0.13",
 ]
 
 [project.scripts]
 hsm = "hsm.cli:main"
-# Lanciato da ssh (SSH_ASKPASS) per chiedere la password: vedi askpass.py.
+# Launched by ssh (SSH_ASKPASS) to ask for the password: see askpass.py.
 hsm-askpass = "hsm.askpass:main"
 
 [dependency-groups]

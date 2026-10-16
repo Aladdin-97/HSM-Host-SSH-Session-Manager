@@ -42,7 +42,7 @@ class FakeKeychain:
 
 @dataclass
 class Env:
-    """Tutto ciò che Unlocker usa del mondo esterno, sostituito da finti."""
+    """Everything Unlocker uses from the outside world, replaced by fakes."""
 
     path: Path
     keychain: FakeKeychain = field(default_factory=FakeKeychain)
@@ -83,13 +83,13 @@ def env(tmp_path: Path) -> Env:
 
 @pytest.fixture
 def ready(env: Env) -> Iterator[Env]:
-    """Un vault esistente con MASTER, Keychain vuoto."""
+    """An existing vault with MASTER, empty Keychain."""
     vault.create(env.path, Secret.from_str(MASTER), FAST)
     yield env
 
 
 def _opens(path: Path, key: Secret) -> bool:
-    vault.load(path, key)  # solleva se la chiave non apre il vault
+    vault.load(path, key)  # raises if the key doesn't open the vault
     return True
 
 
@@ -117,12 +117,12 @@ def test_no_touch_id_falls_back_to_password_never_to_keychain(
     ready: Env, presence: Presence
 ) -> None:
     ready.presence = presence
-    ready.keychain.items[ready.kid()] = b"\x00" * 32  # non deve nemmeno leggerlo
+    ready.keychain.items[ready.kid()] = b"\x00" * 32  # it must not even read it
     ready.answers = [MASTER]
     key = ready.unlocker().get_vault_key()
     assert _opens(ready.path, key)
     assert ready.keychain.loads == 0
-    assert ready.warnings  # l'utente sa perché gli chiediamo la password
+    assert ready.warnings  # the user knows why we ask for the password
 
 
 def test_keychain_error_on_load_falls_back_to_password(ready: Env) -> None:
@@ -134,7 +134,7 @@ def test_keychain_error_on_load_falls_back_to_password(ready: Env) -> None:
 
 
 def test_keychain_unavailable_on_store_still_unlocks(ready: Env) -> None:
-    ready.keychain.fail_store = KeychainUnavailable("security non trovato")
+    ready.keychain.fail_store = KeychainUnavailable("security not found")
     ready.answers = [MASTER]
     key = ready.unlocker().get_vault_key()
     assert _opens(ready.path, key)
@@ -143,7 +143,7 @@ def test_keychain_unavailable_on_store_still_unlocks(ready: Env) -> None:
 
 def test_stale_cached_key_is_deleted_and_replaced(ready: Env) -> None:
     kid = ready.kid()
-    ready.keychain.items[kid] = b"\x01" * 32  # non apre il vault
+    ready.keychain.items[kid] = b"\x01" * 32  # doesn't open the vault
     ready.answers = [MASTER]
     key = ready.unlocker().get_vault_key()
     assert _opens(ready.path, key)
@@ -154,7 +154,7 @@ def test_wrong_password_then_right_one(ready: Env) -> None:
     ready.answers = ["wrong", MASTER]
     key = ready.unlocker().get_vault_key()
     assert _opens(ready.path, key)
-    assert any("errata" in w for w in ready.warnings)
+    assert any("Wrong" in w for w in ready.warnings)
 
 
 def test_too_many_wrong_passwords(ready: Env) -> None:
@@ -166,13 +166,13 @@ def test_too_many_wrong_passwords(ready: Env) -> None:
 
 
 def test_no_terminal_is_clean_error(ready: Env) -> None:
-    ready.answers = []  # il prompt solleva EOFError
-    with pytest.raises(HsmError, match="terminale"):
+    ready.answers = []  # the prompt raises EOFError
+    with pytest.raises(HsmError, match="terminal"):
         ready.unlocker().get_vault_key()
 
 
 def test_missing_vault_fails_before_touch_id(env: Env) -> None:
-    with pytest.raises(VaultError, match="non trovato"):
+    with pytest.raises(VaultError, match="not found"):
         env.unlocker().get_vault_key()
     assert env.presence_calls == 0
 
@@ -198,7 +198,7 @@ def test_init_retries_on_mismatch(env: Env) -> None:
     env.answers = [MASTER, MASTER + "x", MASTER, MASTER]
     key = env.unlocker().init_vault()
     assert _opens(env.path, key)
-    assert any("non coincidono" in w for w in env.warnings)
+    assert any("don't match" in w for w in env.warnings)
 
 
 def test_init_rejects_short_password(env: Env) -> None:
@@ -216,7 +216,7 @@ def test_init_gives_up_without_creating_anything(env: Env) -> None:
 
 
 def test_init_refuses_existing_vault_before_prompting(ready: Env) -> None:
-    with pytest.raises(VaultError, match="Esiste già"):
+    with pytest.raises(VaultError, match="already exists"):
         ready.unlocker().init_vault()
     assert ready.prompts == []
 
@@ -269,7 +269,7 @@ def test_change_with_wrong_old_password_leaves_vault_untouched(ready: Env) -> No
 
 
 def test_default_construction_uses_real_components(tmp_path: Path) -> None:
-    # Costruire un Unlocker senza argomenti non deve toccare nulla.
+    # Building an Unlocker without arguments must not touch anything.
     Unlocker(tmp_path / "vault.enc")
 
 
@@ -277,37 +277,37 @@ def test_empty_password_counts_as_attempt(ready: Env) -> None:
     ready.presence = Presence.UNAVAILABLE
     ready.answers = ["", MASTER]
     assert _opens(ready.path, ready.unlocker().get_vault_key())
-    assert any("vuota" in w for w in ready.warnings)
+    assert any("Empty" in w for w in ready.warnings)
 
 
 def test_failure_to_delete_stale_item_is_only_a_warning(ready: Env) -> None:
     class StickyKeychain(FakeKeychain):
         def delete_key(self, key_id: str) -> bool:
-            raise KeychainError("delete fallita")
+            raise KeychainError("delete failed")
 
     ready.keychain = StickyKeychain()
     ready.keychain.items[ready.kid()] = b"\x01" * 32
     ready.answers = [MASTER]
     assert _opens(ready.path, ready.unlocker().get_vault_key())
-    assert any("rimuovere" in w for w in ready.warnings)
+    assert any("remove" in w for w in ready.warnings)
 
 
 def test_default_warn_goes_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
     from hsm.unlock import _warn_stderr
 
-    _warn_stderr("attenzione")
-    assert capsys.readouterr().err == "hsm: attenzione\n"
+    _warn_stderr("warning")
+    assert capsys.readouterr().err == "hsm: warning\n"
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings ------------------------------------------------
 
 
 def test_unlock_does_not_decode_entries_just_to_verify(
     ready: Env, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Verificare la chiave non deve decifrare tutte le password in memoria.
+    # Verifying the key must not decrypt all passwords into memory.
     def no_load(*args: object) -> None:
-        raise AssertionError("vault.load usato per verificare")
+        raise AssertionError("vault.load used to verify")
 
     monkeypatch.setattr(vault, "load", no_load)
     ready.answers = [MASTER]
@@ -317,14 +317,14 @@ def test_unlock_does_not_decode_entries_just_to_verify(
 def test_non_utf8_input_is_clean_error_without_echo(ready: Env) -> None:
     ready.presence = Presence.UNAVAILABLE
     ready.answers = ["abc\udcff"]
-    with pytest.raises(HsmError, match="caratteri non validi") as info:
+    with pytest.raises(HsmError, match="invalid characters") as info:
         ready.unlocker().get_vault_key()
     assert "udcff" not in str(info.value) and "\udcff" not in str(info.value)
     assert info.value.__cause__ is None and info.value.__suppress_context__
 
 
 def test_min_length_counts_characters_not_bytes(env: Env) -> None:
-    # 4 emoji = 16 byte UTF-8 ma solo 4 caratteri: troppo corta.
+    # 4 emoji = 16 UTF-8 bytes but only 4 characters: too short.
     emoji = "🔑🔑🔑🔑"
     env.answers = [emoji, MASTER, MASTER]
     env.unlocker().init_vault()
@@ -342,10 +342,10 @@ def test_first_entry_wiped_if_confirmation_fails(env: Env, monkeypatch: pytest.M
         return s
 
     monkeypatch.setattr(Secret, "from_str", classmethod(tracking))
-    env.answers = [MASTER]  # la conferma solleva EOFError
+    env.answers = [MASTER]  # the confirmation raises EOFError
     with pytest.raises(HsmError):
         env.unlocker().init_vault()
-    with pytest.raises(ValueError):  # già azzerato
+    with pytest.raises(ValueError):  # already wiped
         created[0].view()
 
 
@@ -366,7 +366,7 @@ def test_rekey_stores_new_item_before_forgetting_old(ready: Env) -> None:
     kc.delete_key = delete  # type: ignore[method-assign]
     ready.answers = [MASTER, NEW_MASTER, NEW_MASTER]
     ready.unlocker().change_master_password()
-    # Se il processo muore a metà, deve esistere già l'item nuovo.
+    # If the process dies halfway, the new item must already exist.
     assert order == ["store", "delete"]
 
 
@@ -390,5 +390,5 @@ def test_corrupt_vault_with_cached_key_propagates_and_keeps_item(ready: Env) -> 
     ready.path.write_bytes(data[: vault.HEADER_SIZE + 3])
     with pytest.raises(VaultFormatError):
         ready.unlocker().get_vault_key()
-    # Un vault rotto non è colpa della chiave: l'item resta.
+    # A broken vault is not the key's fault: the item stays.
     assert kid in ready.keychain.items

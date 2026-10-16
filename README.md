@@ -1,102 +1,104 @@
 # hsm
 
-Un CLI per gestire un inventario di host SSH su macOS, pensato per
-sostituire l'albero sessioni di MobaXterm.
+A CLI to manage an inventory of SSH hosts on macOS, built to replace
+MobaXterm's session tree.
 
-- **Salva gli host** in un file TOML leggibile e versionabile, senza segreti.
-- **Li organizza** con tag e li cerca, anche con un selettore interattivo.
-- **Salva le password** in un vault cifrato (AES-256-GCM, chiave da
-  Argon2id), sbloccato con Touch ID.
-- **Si collega** con l'`ssh` nativo del sistema (`/usr/bin/ssh`). Per gli
-  host con password la inserisce da solo, senza programmi esterni.
-- **Genera un blocco** in `~/.ssh/config`, così `ssh <alias>` funziona anche
-  senza hsm.
+- **Saves hosts** in a readable, versionable TOML file, with no secrets.
+- **Organizes them** with tags and searches them, including with an
+  interactive picker.
+- **Stores passwords** in an encrypted vault (AES-256-GCM, key from
+  Argon2id), unlocked with Touch ID.
+- **Connects** with the system's native `ssh` (`/usr/bin/ssh`). For
+  password hosts it types the password itself, with no external programs.
+- **Generates a block** in `~/.ssh/config`, so `ssh <alias>` works even
+  without hsm.
 
-La chiave SSH è il caso normale: la password è il caso secondario, per gli
-host che non lasciano scelta.
+The SSH key is the normal case: the password is the secondary case, for
+hosts that leave no choice.
 
-> Prima di affidargli password vere, leggi
-> [THREAT_MODEL.md](THREAT_MODEL.md): da cosa hsm protegge e da cosa no.
-
----
-
-## Indice
-
-- [Requisiti](#requisiti)
-- [Installazione](#installazione)
-- [Primi passi](#primi-passi)
-- [Comandi](#comandi)
-- [Il file hosts.toml](#il-file-hoststoml)
-- [Password e vault](#password-e-vault)
-- [Connessione](#connessione)
-- [Sync verso ~/.ssh/config](#sync-verso-sshconfig)
-- [File e permessi](#file-e-permessi)
-- [Sicurezza in breve](#sicurezza-in-breve)
-- [Problemi comuni](#problemi-comuni)
-- [Sviluppo](#sviluppo)
-- [Disinstallazione](#disinstallazione)
+> Before trusting it with real passwords, read
+> [THREAT_MODEL.md](THREAT_MODEL.md): what hsm protects against and what it
+> does not.
 
 ---
 
-## Requisiti
+## Contents
 
-| Cosa | Necessario? | Note |
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Getting started](#getting-started)
+- [Commands](#commands)
+- [The hosts.toml file](#the-hoststoml-file)
+- [Passwords and vault](#passwords-and-vault)
+- [Connection](#connection)
+- [Sync to ~/.ssh/config](#sync-to-sshconfig)
+- [Files and permissions](#files-and-permissions)
+- [Security in brief](#security-in-brief)
+- [Common problems](#common-problems)
+- [Development](#development)
+- [Uninstalling](#uninstalling)
+
+---
+
+## Requirements
+
+| What | Required? | Notes |
 |---|---|---|
-| macOS (Apple Silicon) | sì | Usa Keychain, Touch ID e NSPasteboard |
-| Python 3.12+ | sì | `uv` lo scarica da solo se manca |
-| [uv](https://docs.astral.sh/uv/) | consigliato | Per installare e per lo sviluppo |
-| `/usr/bin/ssh` (OpenSSH ≥ 8.4) | sì | Già presente su macOS. La 8.4 serve per `SSH_ASKPASS_REQUIRE` |
-| `fzf` | opzionale | Per il selettore fuzzy. Senza, c'è una lista numerata |
+| macOS (Apple Silicon) | yes | Uses Keychain, Touch ID and NSPasteboard |
+| Python 3.12+ | yes | `uv` downloads it if missing |
+| [uv](https://docs.astral.sh/uv/) | recommended | For installing and for development |
+| `/usr/bin/ssh` (OpenSSH ≥ 8.4) | yes | Already on macOS. 8.4 is needed for `SSH_ASKPASS_REQUIRE` |
+| `fzf` | optional | For the fuzzy picker. Without it, there is a numbered list |
 
-**Non serve `sshpass`.** Per gli host con password, ssh chiede la password a
-un piccolo helper di hsm (`hsm-askpass`), che viene installato insieme a
-`hsm` (vedi [Connessione](#connessione)).
+**`sshpass` is not needed.** For password hosts, ssh asks for the password
+from a small hsm helper (`hsm-askpass`), which is installed together with
+`hsm` (see [Connection](#connection)).
 
-Per installare fzf con Homebrew:
+To install fzf with Homebrew:
 
 ```bash
 brew install fzf
 ```
 
-### Dipendenze Python
+### Python dependencies
 
-| Pacchetto | Perché |
+| Package | Why |
 |---|---|
-| `cryptography` ≥ 44 | AES-256-GCM e Argon2id. Contiene Argon2 nativo, quindi niente `argon2-cffi` |
-| `tomlkit` | Riscrive `hosts.toml` conservando i commenti scritti a mano |
-| `pyobjc-framework-LocalAuthentication` | Prompt Touch ID: non esiste un comando di sistema equivalente |
-| `pyobjc-framework-Cocoa` | `hsm pw get`: appunti con i tipi "da non salvare in cronologia", cosa che `pbcopy` non permette. È già richiesto dal pacchetto precedente |
+| `cryptography` ≥ 44 | AES-256-GCM and Argon2id. It includes native Argon2, so no `argon2-cffi` |
+| `tomlkit` | Rewrites `hosts.toml` keeping hand-written comments |
+| `pyobjc-framework-LocalAuthentication` | Touch ID prompt: there is no equivalent system command |
+| `pyobjc-framework-Cocoa` | `hsm pw get`: clipboard with the "do not save in history" types, which `pbcopy` does not allow. Already required by the previous package |
 
-La riga di comando usa `argparse` e non `typer`: typer, di default, mostra le
-variabili locali nei traceback, e lì potrebbe finire una password.
+The command line uses `argparse`, not `typer`: by default typer shows local
+variables in tracebacks, and a password could end up there.
 
 ---
 
-## Installazione
+## Installation
 
-Dalla cartella del progetto:
+From the project folder:
 
 ```bash
 uv tool install .
 ```
 
-Questo installa due comandi in `~/.local/bin`:
-- `hsm`, quello che usi tu;
-- `hsm-askpass`, l'helper che usa ssh. Non serve lanciarlo a mano.
+This installs two commands in `~/.local/bin`:
+- `hsm`, the one you use;
+- `hsm-askpass`, the helper used by ssh. You never need to run it by hand.
 
-Se la shell non trova `hsm`, aggiungi quella directory al `PATH`:
+If the shell cannot find `hsm`, add that directory to your `PATH`:
 
 ```bash
 uv tool update-shell
 ```
 
-Per aggiornare dopo un `git pull`:
+To update after a `git pull`:
 
 ```bash
 uv tool install --reinstall .
 ```
 
-Per usarlo senza installarlo, dalla cartella del progetto:
+To use it without installing it, from the project folder:
 
 ```bash
 uv sync
@@ -106,7 +108,7 @@ uv sync
 .venv/bin/hsm --help
 ```
 
-Per controllare che tutto sia al suo posto:
+To check that everything is in place:
 
 ```bash
 hsm paths
@@ -114,364 +116,362 @@ hsm paths
 
 ---
 
-## Primi passi
+## Getting started
 
 ```bash
-# 1. Aggiungi un bastion e un host che passa da lì
+# 1. Add a bastion and a host reached through it
 hsm add bastion --ip bastion.example.com --user jump --port 2200
 hsm add web01 --ip 10.0.0.1 --user deploy --tag prod --tag web --jump bastion
 
-# 2. Guarda l'inventario
+# 2. Look at the inventory
 hsm ls
 
-# 3. Collegati (chiave SSH: nessun prompt di hsm)
+# 3. Connect (SSH key: no hsm prompt)
 hsm connect web01
 
-# 4. Oppure scegli dal selettore e premi invio
+# 4. Or choose from the picker and press Enter
 hsm
 
-# 5. Fai funzionare anche `ssh web01` da qualsiasi terminale
-hsm sync --dry-run      # prima guarda cosa cambierebbe
+# 5. Make `ssh web01` work from any terminal too
+hsm sync --dry-run      # first see what would change
 hsm sync
 ```
 
-Per un host che accetta solo la password, la imposti già in `add`:
+For a host that only accepts a password, you set it right in `add`:
 
 ```bash
 hsm add legacy01 --ip 10.0.0.9 --user admin --password
-hsm connect legacy01    # Touch ID → la password arriva a ssh da sola
+hsm connect legacy01    # Touch ID → the password reaches ssh on its own
 ```
 
-`--password` non prende valori: fa partire un prompt nascosto. La prima
-volta viene creato anche il vault, con la sua master password. Per un host
-già esistente si usa `hsm pw set <alias>`.
+`--password` takes no value: it starts a hidden prompt. The first time, the
+vault is created too, with its master password. For an existing host, use
+`hsm pw set <alias>`.
 
-Senza flag, `hsm add <alias>` fa le domande una per una:
+Without flags, `hsm add <alias>` asks the questions one by one:
 
 ```text
 $ hsm add db
-Hostname o IP: db.example.com
-Utente (invio = default di ssh): postgres
-Porta [22]:
-Tag (separati da spazi): prod db
+Hostname or IP: db.example.com
+User (Enter = ssh default): postgres
+Port [22]:
+Tags (space-separated): prod db
 Jump host:
-Chiave SSH (identity_file): ~/.ssh/id_db
-Nota: il database principale
-Usare una password per questo host (salvata nel vault)? [s/N]
-Aggiunto db.
+SSH key (identity_file): ~/.ssh/id_db
+Note: the main database
+Use a password for this host (stored in the vault)? [y/N]
+Added db.
 ```
 
 ---
 
-## Comandi
+## Commands
 
-| Comando | Cosa fa |
+| Command | What it does |
 |---|---|
-| `hsm` | Selettore interattivo; invio = connect |
-| `hsm add <alias> [flag]` | Aggiunge un host, con i flag o con le domande |
-| `hsm edit <alias> [flag]` | Modifica un host, anche il suo alias |
-| `hsm ls [--tag X] [--sort alias\|tag\|recent]` | Elenca gli host |
-| `hsm rm <alias> [--force]` | Rimuove un host (e la sua password, se ne ha una) |
-| `hsm connect <alias>` | Apre la sessione ssh |
-| `hsm pw set <alias>` | Salva la password dell'host nel vault |
-| `hsm pw get <alias>` | Copia la password negli appunti; si cancella dopo 30 s |
-| `hsm pw rm <alias>` | Toglie la password dal vault |
-| `hsm vault rekey` | Cambia la master password |
-| `hsm sync` | Rigenera il blocco hsm in `~/.ssh/config` |
-| `hsm paths` | Mostra tutti i file e i programmi usati, con il loro stato |
+| `hsm` | Interactive picker; Enter = connect |
+| `hsm add <alias> [flags]` | Adds a host, with flags or with questions |
+| `hsm edit <alias> [flags]` | Edits a host, including its alias |
+| `hsm ls [--tag X] [--sort alias\|tag\|recent]` | Lists the hosts |
+| `hsm rm <alias> [--force]` | Removes a host (and its password, if it has one) |
+| `hsm connect <alias>` | Opens the ssh session |
+| `hsm pw set <alias>` | Stores the host's password in the vault |
+| `hsm pw get <alias>` | Copies the password to the clipboard; cleared after 30 s |
+| `hsm pw rm <alias>` | Removes the password from the vault |
+| `hsm vault rekey` | Changes the master password |
+| `hsm sync` | Regenerates the hsm block in `~/.ssh/config` |
+| `hsm paths` | Shows every file and program used, with its status |
 
-**Opzioni globali**
-- `--debug`: in caso di errore mostra il traceback completo, che non
-  contiene mai le variabili locali.
+**Global options**
+- `--debug`: on error, shows the full traceback, which never contains local
+  variables.
 
-**`--dry-run`** (su `add`, `edit`, `rm`, `sync`)
-- Mostra il diff di quello che cambierebbe e non scrive nulla. Non chiede
-  nemmeno password.
+**`--dry-run`** (on `add`, `edit`, `rm`, `sync`)
+- Shows the diff of what would change and writes nothing. It does not even
+  ask for passwords.
 
-**Flag di `add` ed `edit`**
+**`add` and `edit` flags**
 
-| Flag | Campo | Dove |
+| Flag | Field | Where |
 |---|---|---|
-| `--ip`, `--hostname` | `hostname`: nome DNS o indirizzo IP (obbligatorio in `add` se usi i flag) | add, edit |
+| `--ip`, `--hostname` | `hostname`: DNS name or IP address (required in `add` if you use flags) | add, edit |
 | `--user` | `user` | add, edit |
 | `--port` | `port` | add, edit |
-| `--tag` | `tags`, ripetibile: `--tag prod --tag web` | add, edit |
+| `--tag` | `tags`, repeatable: `--tag prod --tag web` | add, edit |
 | `--jump` | `jump_host` | add, edit |
 | `--identity` | `identity_file` | add, edit |
 | `--note` | `note` | add, edit |
-| `--password` | chiede la password (nascosta) e la salva nel vault | solo add |
-| `--alias NUOVO` | rinomina l'host | solo edit |
+| `--password` | asks for the password (hidden) and stores it in the vault | add only |
+| `--alias NEW` | renames the host | edit only |
 
-**Tre dettagli pratici**
-- **La password non si passa mai come valore.** `--password s3cret` viene
-  rifiutato, perché finirebbe nella cronologia della shell e negli
-  argomenti visibili con `ps`. Se ti capita, cancella la riga dalla
-  cronologia e considera la password esposta.
-- **Un valore che inizia con `-` va passato con `=`**, altrimenti argparse lo
-  scambia per un'opzione: `--note=-da-rivedere`.
-- **Per cancellare un campo** usa `hsm edit <alias>` senza flag e rispondi
-  `-` alla domanda; invio lascia il valore com'è. Con i flag si possono solo
-  impostare valori, non cancellarli.
+**Three practical details**
+- **The password is never passed as a value.** `--password s3cret` is
+  rejected, because it would end up in the shell history and in the
+  arguments visible with `ps`. If it happens, delete the line from the
+  history and consider the password exposed.
+- **A value starting with `-` must be passed with `=`**, otherwise argparse
+  takes it for an option: `--note=-to-review`.
+- **To clear a field**, use `hsm edit <alias>` without flags and answer `-`
+  to the question; Enter leaves the value as it is. Flags can only set
+  values, not clear them.
 
-**Rinominare un host**
+**Renaming a host**
 
 ```bash
 hsm edit bastion --alias gw
 ```
 
-In modalità interattiva la prima domanda è `Alias [bastion]`. La rinomina
-aggiorna anche:
-- gli host che usavano quell'alias come `jump_host`;
-- la password nel vault, se l'host ne ha una (serve lo sblocco);
-- l'ultimo uso.
+In interactive mode the first question is `Alias [bastion]`. The rename
+also updates:
+- the hosts that used that alias as `jump_host`;
+- the password in the vault, if the host has one (unlocking is required);
+- the last use.
 
-`~/.ssh/config` invece no: rilancia `hsm sync`. Nel file `hosts.toml` la
-tabella rinominata finisce in fondo; i commenti al suo interno restano.
+`~/.ssh/config` is not updated: run `hsm sync` again. In `hosts.toml` the
+renamed table moves to the end; the comments inside it are kept.
 
-**Ordinamento di `hsm ls`**
-- `alias` (default), `tag` (per primo tag, gli host senza tag in fondo),
-  `recent` (prima i più usati di recente).
+**`hsm ls` sorting**
+- `alias` (default), `tag` (by first tag, hosts without tags last),
+  `recent` (most recently used first).
 
 ```text
 $ hsm ls --sort recent
-ALIAS     HOST                           TAG         AUTH      ULTIMO USO
+ALIAS     HOST                           TAG         AUTH      LAST USED
 web01     deploy@10.0.0.1                #prod #web  key       2026-10-16 14:02
 legacy01  admin@10.0.0.9                 -           password  2026-10-15 09:30
-bastion   jump@bastion.example.com:2200  -           key       mai
+bastion   jump@bastion.example.com:2200  -           key       never
 ```
 
-**Selettore (`hsm` senza argomenti)**
-- **Con fzf:** filtro fuzzy, invio per scegliere, Esc per uscire.
-- **Senza fzf:** lista numerata. Digiti un numero per scegliere, oppure un
-  testo per filtrare (cerca in alias, host, tag e note).
-  - Il filtro sceglie da solo solo se il testo è **esattamente un alias**;
-    altrimenti serve il numero, così un refuso non ti collega a un host
-    qualsiasi.
-  - Un filtro fatto solo di cifre viene sempre letto come numero di riga.
+**Picker (`hsm` without arguments)**
+- **With fzf:** fuzzy filter, Enter to choose, Esc to quit.
+- **Without fzf:** numbered list. Type a number to choose, or some text to
+  filter (it searches alias, host, tags and notes).
+  - The filter chooses on its own only if the text is **exactly an alias**;
+    otherwise you need the number, so a typo does not connect you to some
+    random host.
+  - A filter made only of digits is always read as a line number.
 
-**`hsm rm` di un host usato come jump**
-- Se l'host è il `jump_host` di altri host, serve `--force`. Altrimenti
-  quegli host risolverebbero il bastion via DNS, magari verso una macchina
-  diversa.
+**`hsm rm` of a host used as a jump**
+- If the host is the `jump_host` of other hosts, `--force` is required.
+  Otherwise those hosts would resolve the bastion via DNS, possibly to a
+  different machine.
 
 **`hsm paths`**
 
 ```text
 $ hsm paths
-COSA               PERCORSO                         STATO
-Configurazione     ~/.config/hsm                    ok (700)
-Inventario         ~/.config/hsm/hosts.toml         ok (600)
-Vault              ~/.config/hsm/vault.enc          ok (600)
-Stato              ~/.config/hsm/state.toml         ok (600)
-Lock               ~/.config/hsm/vault.lock         ok (600)
-SSH config         ~/.ssh/config                    ok (600), blocco hsm presente
-Backup SSH config  ~/.ssh/config.hsm-backup-*       2 file, ultimo config.hsm-backup-20261016T141034
-Keychain           login keychain, servizio hsm, account 3f2a…   presente (sblocco con Touch ID)
-ssh                /usr/bin/ssh                     ok
-hsm-askpass        ~/.local/share/uv/tools/hsm/bin/hsm-askpass   ok (password automatica per ssh)
-fzf                -                                non installato: lista numerata
-Python             ~/.local/share/uv/tools/hsm/bin/python        esegue hsm e il watchdog degli appunti
+WHAT               PATH                                         STATUS
+Config dir         ~/.config/hsm                                ok (700)
+Inventory          ~/.config/hsm/hosts.toml                     ok (600)
+Vault              ~/.config/hsm/vault.enc                      ok (600)
+State              ~/.config/hsm/state.toml                     ok (600)
+Lock               ~/.config/hsm/vault.lock                     ok (600)
+SSH config         ~/.ssh/config                                ok (600), hsm block present
+Backup SSH config  ~/.ssh/config.hsm-backup-*                   2 file(s), latest config.hsm-backup-20261016T141034
+Keychain           login keychain, service hsm, account 3f2a…   present (unlock with Touch ID)
+ssh                /usr/bin/ssh                                 ok
+hsm-askpass        ~/.local/share/uv/tools/hsm/bin/hsm-askpass  ok (automatic password for ssh)
+fzf                -                                            not installed: numbered list
+Python             ~/.local/share/uv/tools/hsm/bin/python       runs hsm and the clipboard watchdog
 ```
 
-- È l'unico comando che **gira anche con i permessi sbagliati**, proprio per
-  mostrarteli insieme al `chmod` da lanciare.
-- È in sola lettura: non crea file, non apre il vault e non legge segreti.
-  Del Keychain controlla solo che l'item esista.
+- It is the only command that **runs even with wrong permissions**,
+  precisely to show them to you together with the `chmod` to run.
+- It is read-only: it creates no files, does not open the vault and reads
+  no secrets. For the Keychain it only checks that the item exists.
 
 ---
 
-## Il file hosts.toml
+## The hosts.toml file
 
-Vive in `~/.config/hsm/hosts.toml`. Una tabella per host:
+It lives in `~/.config/hsm/hosts.toml`. One table per host:
 
 ```toml
-# I miei server: i commenti restano anche dopo hsm add/edit.
+# My servers: comments are kept even after hsm add/edit.
 
 [hosts.web01]
 hostname = "10.0.0.1"
 user = "deploy"
-port = 2222                      # omesso se 22
+port = 2222                      # omitted if 22
 tags = ["prod", "web"]
-jump_host = "bastion"            # alias hsm, oppure [user@]host[:port]
+jump_host = "bastion"            # hsm alias, or [user@]host[:port]
 identity_file = "~/.ssh/id_ed25519"
-note = "frontend principale"
+note = "main frontend"
 
 [hosts.legacy01]
 hostname = "10.0.0.9"
 user = "admin"
-auth = "password"                # impostato da `hsm add --password` / `hsm pw set`
+auth = "password"                # set by `hsm add --password` / `hsm pw set`
 ```
 
-| Campo | Obbligatorio | Regole |
+| Field | Required | Rules |
 |---|---|---|
-| alias (nome della tabella) | sì | Lettere, cifre, `.`, `_`, `-`; inizia con lettera o cifra; max 64. Unico **senza distinguere maiuscole** (come fa ssh) e mai uguale all'hostname di un altro host |
-| `hostname` | sì | Nome DNS o indirizzo IP (IPv4, IPv6, anche con zona come `fe80::1%en0`). Mai un `-` iniziale |
-| `user` | no | Lettere, cifre, `.`, `_`, `-`; niente `@` |
+| alias (table name) | yes | Letters, digits, `.`, `_`, `-`; starts with a letter or digit; max 64. Unique **case-insensitively** (as ssh does) and never equal to another host's hostname |
+| `hostname` | yes | DNS name or IP address (IPv4, IPv6, also with a zone such as `fe80::1%en0`). Never a leading `-` |
+| `user` | no | Letters, digits, `.`, `_`, `-`; no `@` |
 | `port` | no | 1–65535, default 22 |
-| `tags` | no | Lista di parole: lettere, cifre, `_`, `-` |
-| `jump_host` | no | Un alias dell'inventario oppure `[user@]host[:port]`, con IPv6 tra `[ ]`. **Mai `none`**: per ssh significherebbe "nessun bastion" |
-| `identity_file` | no | Assoluto o che inizia con `~`. Spazi ammessi; vietati `"`, `\`, `%` e `$`, che ssh_config espanderebbe |
-| `note` | no | Testo libero su una riga, senza caratteri di controllo |
-| `auth` | no | `"key"` (default, omesso nel file) oppure `"password"` |
+| `tags` | no | List of words: letters, digits, `_`, `-` |
+| `jump_host` | no | An inventory alias or `[user@]host[:port]`, with IPv6 in `[ ]`. **Never `none`**: to ssh it would mean "no bastion" |
+| `identity_file` | no | Absolute or starting with `~`. Spaces allowed; `"`, `\`, `%` and `$`, which ssh_config would expand, are forbidden |
+| `note` | no | Free text on one line, without control characters |
+| `auth` | no | `"key"` (default, omitted from the file) or `"password"` |
 
-Nel file il campo si chiama `hostname`, come il `HostName` di ssh, ma accetta
-indifferentemente un nome o un IP; per questo il flag ha anche la forma
-`--ip`.
+In the file the field is called `hostname`, like ssh's `HostName`, but it
+accepts either a name or an IP; that is why the flag also has the `--ip`
+form.
 
-`auth` dice solo **come** ci si autentica, mai con cosa. Serve perché
-`hsm connect` sappia se aprire il vault: per gli host a chiave non c'è
-nessun Touch ID e nessuna master password. Lo impostano
-`hsm add --password` e `hsm pw set`, e lo toglie `hsm pw rm`.
+`auth` only says **how** you authenticate, never with what. It lets
+`hsm connect` know whether to open the vault: for key hosts there is no
+Touch ID and no master password. It is set by `hsm add --password` and
+`hsm pw set`, and removed by `hsm pw rm`.
 
-Le regole sono strette perché questi valori finiscono negli argomenti di
-ssh e in `~/.ssh/config`. Per esempio un hostname `-oProxyCommand=…`
-verrebbe eseguito da ssh come un comando. Un errore nel file dice quale host
-e quale campo correggere:
+The rules are strict because these values end up in ssh's arguments and in
+`~/.ssh/config`. For example a hostname `-oProxyCommand=…` would be run by
+ssh as a command. An error in the file says which host and which field to
+fix:
 
 ```text
-hsm: Host web01: hostname non valido: '-oProxyCommand=touch /tmp/x'
+hsm: Host web01: invalid hostname: '-oProxyCommand=touch /tmp/x'
 ```
 
-**Versionarlo con git** va bene: non contiene segreti, ma è una mappa della
-tua infrastruttura, quindi niente repository pubblici. git non conserva i
-permessi 0600: dopo un clone hsm si rifiuta di partire e ti dice il `chmod`
-da lanciare.
+**Versioning it with git** is fine: it contains no secrets, but it is a map
+of your infrastructure, so no public repositories. git does not preserve
+0600 permissions: after a clone hsm refuses to start and tells you the
+`chmod` to run.
 
 ---
 
-## Password e vault
+## Passwords and vault
 
-### Come funziona lo sblocco
+### How unlocking works
 
 ```text
 hsm connect legacy01
    │
-   ├─ Touch ID ──ok──► chiave dal Keychain ──apre il vault?──sì──► ssh (password automatica)
+   ├─ Touch ID ──ok──► key from Keychain ──opens the vault?──yes──► ssh (automatic password)
    │                         │                     │
-   └─ annullato / non        └─ assente            └─ no: la rimuove
-      disponibile                │                     │
-      (es. via SSH)              ▼                     ▼
-                       ──────────► master password (3 tentativi)
-                                   └─► salva la chiave nel Keychain
+   └─ cancelled / not        └─ missing            └─ no: removes it
+      available                  │                     │
+      (e.g. over SSH)            ▼                     ▼
+                       ──────────► master password (3 attempts)
+                                   └─► saves the key in the Keychain
 ```
 
-- **La prima volta** (`hsm add --password` o `hsm pw set` senza vault) hsm
-  crea il vault e ti chiede una **master password nuova**, due volte, di
-  almeno 12 caratteri.
-- **Dopo il primo sblocco**, la chiave derivata (non la master password) va
-  nel login keychain e gli sblocchi successivi passano dal Touch ID. Se
-  Touch ID non è disponibile (Mac via SSH, coperchio chiuso senza Apple
-  Watch) hsm chiede la master password. Non ripiega mai su "niente
-  cifratura".
-- **`hsm vault rekey`** cambia la master password. Chiede **la vecchia
-  digitata**: il Touch ID non basta. Rigenera salt e chiave e aggiorna
-  l'item nel Keychain.
+- **The first time** (`hsm add --password` or `hsm pw set` with no vault)
+  hsm creates the vault and asks you for a **new master password**, twice,
+  of at least 12 characters.
+- **After the first unlock**, the derived key (not the master password) goes
+  into the login keychain and later unlocks go through Touch ID. If Touch ID
+  is not available (Mac over SSH, lid closed without an Apple Watch) hsm
+  asks for the master password. It never falls back to "no encryption".
+- **`hsm vault rekey`** changes the master password. It asks for **the old
+  one, typed**: Touch ID is not enough. It regenerates salt and key and
+  updates the Keychain item.
 
-### Formato di vault.enc
+### vault.enc format
 
-| Byte | Campo |
+| Bytes | Field |
 |---|---|
 | 0–3 | `HSMV` |
-| 4 | versione del formato (1) |
+| 4 | format version (1) |
 | 5 | KDF (1 = Argon2id) |
-| 6–9, 10–13, 14 | memoria (KiB), passate, parallelismo |
-| 15–31 | lunghezza (16) e salt |
-| 32–44 | lunghezza (12) e nonce |
-| 45– | testo cifrato + tag GCM |
+| 6–9, 10–13, 14 | memory (KiB), passes, parallelism |
+| 15–31 | length (16) and salt |
+| 32–44 | length (12) and nonce |
+| 45– | ciphertext + GCM tag |
 
-Le scelte crittografiche sono spiegate nei commenti di
+The cryptographic choices are explained in the comments of
 [src/hsm/vault.py](src/hsm/vault.py):
-- **AES-256-GCM:** cifratura autenticata, quindi rileva le manomissioni.
-- **Argon2id** con 256 MiB, 3 passate e 4 lane: rende costoso il brute
-  force.
-- **Nonce di 96 bit** casuale a ogni scrittura, mai riusato.
-- **Salt di 128 bit** generato una volta e salvato in chiaro.
-- **Header autenticato** come AAD: nessuno può abbassare i parametri senza
-  che la decifratura fallisca.
+- **AES-256-GCM:** authenticated encryption, so it detects tampering.
+- **Argon2id** with 256 MiB, 3 passes and 4 lanes: makes brute force
+  expensive.
+- **96-bit nonce**, random on every write, never reused.
+- **128-bit salt**, generated once and stored in clear.
+- **Header authenticated** as AAD: nobody can lower the parameters without
+  decryption failing.
 
-### Cose da sapere
+### Things to know
 
-- **Non c'è recupero.** Senza master password e senza item nel Keychain il
-  vault è perso.
-- **Il rekey non cambia le copie vecchie del vault** che stanno nei backup:
-  quelle si aprono ancora con la vecchia master password.
+- **There is no recovery.** Without the master password and without the
+  Keychain item, the vault is lost.
+- **Rekey does not change old copies of the vault** sitting in backups:
+  those still open with the old master password.
 
 ---
 
-## Connessione
+## Connection
 
-`hsm connect` costruisce la riga di comando di ssh dai campi dell'host, e
-funziona anche senza aver mai fatto `hsm sync`:
+`hsm connect` builds the ssh command line from the host's fields, and works
+even if you have never run `hsm sync`:
 
 ```text
 /usr/bin/ssh -l deploy -p 2222 -J jump@bastion.example.com:2200 \
-             -i /Users/tu/.ssh/id_ed25519 -o IdentitiesOnly=yes -- 10.0.0.1
+             -i /Users/you/.ssh/id_ed25519 -o IdentitiesOnly=yes -- 10.0.0.1
 ```
 
-- **`--`** impedisce che la destinazione venga letta come opzione.
-- **`-J`**: se `jump_host` è un alias dell'inventario viene tradotto in
-  `user@host:porta`, risalendo la catena se anche il bastion ha un jump.
-  L'`identity_file` del bastion vale solo dopo `hsm sync`.
-- **`IdentitiesOnly=yes`** accanto a `-i` evita "Too many authentication
-  failures" quando l'agent ha molte chiavi.
-- **Ctrl-C durante la sessione arriva a ssh**, non a hsm.
-- **Il codice d'uscita di `hsm connect` è quello di ssh.**
+- **`--`** prevents the destination from being read as an option.
+- **`-J`**: if `jump_host` is an inventory alias it is translated to
+  `user@host:port`, following the chain if the bastion has a jump too.
+  The bastion's `identity_file` applies only after `hsm sync`.
+- **`IdentitiesOnly=yes`** next to `-i` avoids "Too many authentication
+  failures" when the agent holds many keys.
+- **Ctrl-C during the session goes to ssh**, not to hsm.
+- **The exit code of `hsm connect` is ssh's.**
 
-### Host con `auth = "password"`
+### Hosts with `auth = "password"`
 
-OpenSSH sa chiedere la password a un programma esterno invece che al
-terminale (`SSH_ASKPASS`, con `SSH_ASKPASS_REQUIRE=force`). hsm lo usa con
-il suo helper `hsm-askpass`:
+OpenSSH can ask an external program for the password instead of the
+terminal (`SSH_ASKPASS`, with `SSH_ASKPASS_REQUIRE=force`). hsm uses this
+with its helper `hsm-askpass`:
 
 ```text
 hsm connect legacy01
-  → Touch ID → password dal vault
-  → ssh: "admin@10.0.0.9's password: " → hsm-askpass → la password arriva da sola
+  → Touch ID → password from the vault
+  → ssh: "admin@10.0.0.9's password: " → hsm-askpass → the password arrives on its own
 ```
 
-**Quando la password viene consegnata.** Solo se valgono tutte queste
-condizioni:
-1. la domanda è **esattamente** `utente@host's password: ` (o la variante
-   keyboard-interactive) dell'host di destinazione. Valgono anche i nomi
-   effettivi secondo `ssh -G`, se il tuo `~/.ssh/config` cambia `HostName`
-   o `User`;
-2. a chiedere è un helper **figlio del processo ssh principale**. Lo
-   verifica il kernel, non lo dichiara l'helper. È ciò che esclude il ssh
-   del jump host, anche quando il bastion ha lo stesso `utente@host` su
-   un'altra porta;
-3. è **la prima volta**. Se ssh la richiede vuol dire che era sbagliata: la
-   domanda passa a te, e alla fine hsm ti dice di aggiornarla con
-   `hsm pw set`.
+**When the password is handed over.** Only if all these conditions hold:
+1. the question is **exactly** `user@host's password: ` (or the
+   keyboard-interactive variant) of the destination host. The effective
+   names according to `ssh -G` count too, if your `~/.ssh/config` changes
+   `HostName` or `User`;
+2. the one asking is a helper that is a **child of the main ssh process**.
+   The kernel verifies this, the helper does not just claim it. This is
+   what rules out the jump host's ssh, even when the bastion has the same
+   `user@host` on another port;
+3. it is **the first time**. If ssh asks again it means the password was
+   wrong: the question goes to you, and at the end hsm tells you to update
+   it with `hsm pw set`.
 
-**Tutto il resto lo rispondi tu sul terminale**: la conferma di una chiave
-host sconosciuta, la password del bastion, i codici OTP, le passphrase.
-- La conferma della chiave host non riceve **mai** una risposta automatica:
-  un "yes" automatico accetterebbe un server qualsiasi.
-- La risposta si vede mentre la scrivi solo per quella domanda; per tutte le
-  altre resta nascosta.
-- Dal testo delle domande, che può venire dal server, vengono tolti i
-  caratteri di controllo prima di mostrarlo.
+**You answer everything else in the terminal**: confirming an unknown host
+key, the bastion's password, OTP codes, passphrases.
+- The host key confirmation **never** gets an automatic answer: an
+  automatic "yes" would accept any server.
+- The answer is visible while you type it only for that question; for all
+  the others it stays hidden.
+- Control characters are stripped from the question text, which can come
+  from the server, before it is shown.
 
-**Come viaggia la password.** Mai negli argomenti (visibili con `ps`) né
-nell'ambiente. hsm apre per la durata del connect un socket Unix in una
-directory privata (0700), e passa a ssh solo il suo percorso e un token
-casuale. A fine connessione, anche con SIGTERM o la finestra chiusa, il
-socket viene rimosso e la password azzerata.
+**How the password travels.** Never in the arguments (visible with `ps`) or
+in the environment. For the duration of the connect hsm opens a Unix socket
+in a private directory (0700), and passes ssh only its path and a random
+token. When the connection ends, even with SIGTERM or the window closed,
+the socket is removed and the password wiped.
 
 ---
 
-## Sync verso ~/.ssh/config
+## Sync to ~/.ssh/config
 
 ```bash
-hsm sync --dry-run    # mostra il diff
+hsm sync --dry-run    # shows the diff
 hsm sync
 ```
 
-Scrive solo tra due marker:
+It writes only between two markers:
 
 ```text
 # >>> hsm begin
-# Generato da `hsm sync`: le modifiche qui dentro verranno sovrascritte.
+# Generated by `hsm sync`: changes inside this block will be overwritten.
 
 Host web01
     HostName 10.0.0.1
@@ -481,166 +481,169 @@ Host web01
     IdentityFile "~/.ssh/id_ed25519"
     IdentitiesOnly yes
 
-# Riporta lo scope a globale per le righe che seguono il blocco.
+# Resets the scope to global for the lines after this block.
 Host *
 # <<< hsm end
 ```
 
-**Le regole**
-- **Tutto ciò che sta fuori dai marker resta identico, byte per byte.**
-- **Se i marker non ci sono, il blocco va in cima al file.** In ssh_config
-  vince il primo valore trovato, quindi in cima i valori di hsm non vengono
-  scavalcati da un `Host *` scritto più in basso.
-- **Il `Host *` finale serve a non rompere le tue opzioni globali.** In
-  ssh_config un'opzione appartiene al blocco `Host` sopra di lei: senza
-  quella riga, un `ServerAliveInterval` che avevi in cima al file finirebbe
-  dentro l'ultimo host di hsm. È verificato con `ssh -G`.
-- **Prima di scrivere c'è un backup 0600**,
-  `~/.ssh/config.hsm-backup-AAAAMMGGTHHMMSS`, ma solo se qualcosa cambia.
-  I backup non vengono mai cancellati: ripuliscili a mano ogni tanto.
-- **È idempotente:** due sync di fila producono lo stesso file e nessun
-  secondo backup.
-- **hsm non tocca il file in tre casi:** marker malformati (uno solo,
-  invertiti, doppi), file modificato da un editor durante la sync, file che
-  non è testo UTF-8. In tutti e tre ti dice cosa correggere.
-- **Dopo una rinomina** (`hsm edit --alias`) il blocco ha ancora il vecchio
-  nome finché non rilanci `hsm sync`.
+**The rules**
+- **Everything outside the markers stays identical, byte for byte.**
+- **If the markers are missing, the block goes at the top of the file.** In
+  ssh_config the first value found wins, so at the top hsm's values are not
+  overridden by a `Host *` written further down.
+- **The final `Host *` keeps your global options from breaking.** In
+  ssh_config an option belongs to the `Host` block above it: without that
+  line, a `ServerAliveInterval` you had at the top of the file would end up
+  inside hsm's last host. This is verified with `ssh -G`.
+- **Before writing there is a 0600 backup**,
+  `~/.ssh/config.hsm-backup-YYYYMMDDTHHMMSS`, but only if something
+  changes. Backups are never deleted: clean them up by hand from time to
+  time.
+- **It is idempotent:** two syncs in a row produce the same file and no
+  second backup.
+- **hsm does not touch the file in three cases:** malformed markers (only
+  one, swapped, duplicated), file modified by an editor during the sync,
+  file that is not UTF-8 text. In all three it tells you what to fix.
+- **After a rename** (`hsm edit --alias`) the block still has the old name
+  until you run `hsm sync` again.
 
-La password non entra mai nel blocco: `ssh <alias>` da un terminale normale
-te la chiede. La password automatica c'è solo con `hsm connect`.
+The password never goes into the block: `ssh <alias>` from a normal
+terminal asks you for it. The automatic password exists only with
+`hsm connect`.
 
 ---
 
-## File e permessi
+## Files and permissions
 
-| Percorso | Contenuto | Permessi |
+| Path | Contents | Permissions |
 |---|---|---|
-| `~/.config/hsm/` | directory di hsm | 0700 |
-| `~/.config/hsm/hosts.toml` | inventario, in chiaro | 0600 |
-| `~/.config/hsm/vault.enc` | password, cifrate | 0600 |
-| `~/.config/hsm/state.toml` | ultimo uso per host | 0600 |
-| `~/.config/hsm/vault.lock` | lock tra processi hsm (vuoto) | 0600 |
-| `~/.ssh/config` | blocco generato da `hsm sync` | 0600 (`~/.ssh` 0700) |
-| `$TMPDIR/hsm-askpass-*/s` | socket della password, solo durante un connect | 0700 / 0600 |
-| login keychain, item `hsm` | chiave del vault | gestito da macOS |
+| `~/.config/hsm/` | hsm directory | 0700 |
+| `~/.config/hsm/hosts.toml` | inventory, in clear | 0600 |
+| `~/.config/hsm/vault.enc` | passwords, encrypted | 0600 |
+| `~/.config/hsm/state.toml` | last use per host | 0600 |
+| `~/.config/hsm/vault.lock` | lock between hsm processes (empty) | 0600 |
+| `~/.ssh/config` | block generated by `hsm sync` | 0600 (`~/.ssh` 0700) |
+| `$TMPDIR/hsm-askpass-*/s` | password socket, only during a connect | 0700 / 0600 |
+| login keychain, item `hsm` | vault key | managed by macOS |
 
-`hsm paths` li mostra tutti, con il loro stato.
+`hsm paths` shows them all, with their status.
 
-**I controlli all'avvio**
-- Directory e file devono appartenere a te, non essere symlink e non essere
-  accessibili a gruppo o altri.
-- Se qualcosa non torna, hsm **si rifiuta di partire** e stampa il `chmod`
-  da lanciare. Non corregge da solo: un permesso sbagliato può essere il
-  segno di qualcosa da capire.
-- Fa eccezione `hsm paths`, che serve proprio a vedere questi problemi.
-- I permessi di `~/.ssh/config` vengono controllati da `hsm sync`, non a
-  ogni comando.
+**Startup checks**
+- Directories and files must belong to you, must not be symlinks and must
+  not be accessible to group or others.
+- If something is off, hsm **refuses to start** and prints the `chmod` to
+  run. It does not fix things on its own: a wrong permission may be the
+  sign of something worth understanding.
+- The exception is `hsm paths`, whose job is precisely to show these
+  problems.
+- The permissions of `~/.ssh/config` are checked by `hsm sync`, not on
+  every command.
 
-**Come vengono scritti i file**
-- Tutte le scritture sono atomiche (file temporaneo 0600, poi rename) e
-  forzate su disco.
-- Le modifiche a `hosts.toml` e al vault avvengono sotto un lock: due hsm
-  in parallelo non si cancellano le modifiche a vicenda.
+**How files are written**
+- All writes are atomic (0600 temporary file, then rename) and forced to
+  disk.
+- Changes to `hosts.toml` and to the vault happen under a lock: two hsm
+  processes in parallel do not overwrite each other's changes.
 
-**Lo stato**
-- `state.toml` è un dato di comodo: se si rompe, hsm avvisa e lo riscrive.
-  Non blocca mai un connect.
+**State**
+- `state.toml` is convenience data: if it breaks, hsm warns and rewrites
+  it. It never blocks a connect.
 
 ---
 
-## Sicurezza in breve
+## Security in brief
 
-**Protegge da**
-- chi ottiene una copia di `vault.enc` (backup, disco perso, dotfile
-  pubblicati);
-- altri utenti dello stesso Mac;
-- valori malevoli in `hosts.toml` che proverebbero a iniettare opzioni o
-  righe di configurazione;
-- un server o un bastion che prova a farsi dare la password di un altro
-  host, o a farsi accettare la chiave host senza conferma.
+**Protects against**
+- anyone who gets a copy of `vault.enc` (backups, lost disk, published
+  dotfiles);
+- other users on the same Mac;
+- malicious values in `hosts.toml` that would try to inject options or
+  configuration lines;
+- a server or bastion trying to get another host's password, or to get its
+  host key accepted without confirmation.
 
-**Non protegge da**
-- codice malevolo che gira come il tuo utente: può leggere la chiave dal
-  Keychain senza prompt;
+**Does not protect against**
+- malicious code running as your user: it can read the key from the
+  Keychain without a prompt;
 - root;
-- chi ha il tuo Mac sbloccato e sa usare il terminale;
-- il server che riceve la password quando ti autentichi con password;
-- i comandi che il tuo `~/.ssh/config` fa lanciare a ssh (`ProxyCommand`,
-  `LocalCommand`, `Match exec`): sono figli di ssh e potrebbero chiedere la
-  password come l'helper.
+- someone who has your unlocked Mac and knows how to use the terminal;
+- the server that receives the password when you authenticate with a
+  password;
+- the commands your `~/.ssh/config` makes ssh run (`ProxyCommand`,
+  `LocalCommand`, `Match exec`): they are children of ssh and could ask for
+  the password just like the helper.
 
-Il Touch ID di hsm è un controllo d'interfaccia, non una barriera
-crittografica. Python non garantisce di poter azzerare la memoria: hsm
-riduce le copie in chiaro, ma non può eliminarle tutte.
+hsm's Touch ID is an interface check, not a cryptographic barrier. Python
+does not guarantee that memory can be wiped: hsm reduces plaintext copies,
+but cannot eliminate them all.
 
-I dettagli, i limiti per componente e i consigli sono in
+Details, per-component limits and recommendations are in
 **[THREAT_MODEL.md](THREAT_MODEL.md)**.
 
 ---
 
-## Problemi comuni
+## Common problems
 
-**`Permessi troppo aperti su … Correggi con: chmod 600 …`**
-Lancia il comando suggerito. Succede spesso dopo aver clonato `hosts.toml`
-da git, o con un `~/.ssh/config` creato con i permessi di default (0644).
-`hsm paths` mostra tutti i file con un problema in una volta.
+**`Permissions too open on … Fix with: chmod 600 …`**
+Run the suggested command. It often happens after cloning `hosts.toml`
+from git, or with a `~/.ssh/config` created with default permissions
+(0644). `hsm paths` shows every file with a problem at once.
 
-**`hsm sync`: `~/.ssh/config è un symlink`**
-hsm non scrive attraverso un symlink. Succede spesso se gestisci i dotfile
-con un repository. Ci sono due strade:
-- sostituisci il symlink con un file vero e aggiungi una riga
-  `Include ~/dotfiles/ssh_config` che punti al tuo file;
-- oppure non usare `hsm sync` e collegati con `hsm connect`.
+**`hsm sync`: `~/.ssh/config is a symlink`**
+hsm does not write through a symlink. This often happens if you manage your
+dotfiles with a repository. There are two ways out:
+- replace the symlink with a real file and add an
+  `Include ~/dotfiles/ssh_config` line pointing to your file;
+- or do not use `hsm sync` and connect with `hsm connect`.
 
-**Alla prima connessione ssh chiede di confermare la chiave dell'host**
-È voluto: hsm non risponde mai da solo a quella domanda. Verifica
-l'impronta (con l'amministratore del server, o da un canale fidato) e
-rispondi `yes` nel terminale.
+**On the first connection ssh asks you to confirm the host key**
+This is intended: hsm never answers that question on its own. Verify the
+fingerprint (with the server's administrator, or through a trusted channel)
+and answer `yes` in the terminal.
 
-**`Il server ha rifiutato la password salvata per …`**
-Probabilmente è cambiata sul server. Aggiornala:
+**`The server rejected the saved password for …`**
+It has probably changed on the server. Update it:
 
 ```bash
 hsm pw set legacy01
 ```
 
-**`… hsm-askpass non trovato: reinstalla hsm`**
-L'helper deve stare accanto all'interprete di hsm. Reinstalla:
+**`… hsm-askpass not found: reinstall hsm`**
+The helper must sit next to hsm's interpreter. Reinstall:
 
 ```bash
 uv tool install --reinstall .
 ```
 
-**La password non viene inserita da sola e ssh la chiede a te**
-Di solito il tuo `~/.ssh/config` cambia `HostName` o `User` in un modo che
-hsm non ha potuto risolvere, oppure il server usa un prompt diverso dal
-solito. Non c'è rischio: semplicemente la digiti tu. Con `ssh -G <host>`
-vedi i valori effettivi.
+**The password is not typed automatically and ssh asks you for it**
+Usually your `~/.ssh/config` changes `HostName` or `User` in a way hsm
+could not resolve, or the server uses an unusual prompt. There is no risk:
+you simply type it yourself. `ssh -G <host>` shows the effective values.
 
-**`Touch ID non disponibile: inserisci la master password`**
-Normale se sei collegato al Mac via SSH o se il coperchio è chiuso senza
-Apple Watch.
+**`Touch ID unavailable: enter the master password.`**
+Normal if you are connected to the Mac over SSH or the lid is closed
+without an Apple Watch.
 
-**`Un altro hsm sta modificando il vault`**
-Un altro comando hsm sta aspettando una password o il Touch ID. Completalo
-o chiudilo, poi riprova.
+**`Another hsm is modifying the vault`**
+Another hsm command is waiting for a password or Touch ID. Finish it or
+close it, then try again.
 
-**`jump_host 'xyz' non è un alias dell'inventario`**
-Probabilmente è un refuso nel nome del bastion. Se invece è davvero un nome
-host senza dominio, l'avviso si può ignorare.
+**`jump_host 'xyz' is not an inventory alias`**
+Probably a typo in the bastion's name. If it really is a host name without
+a domain, the warning can be ignored.
 
 **`argument --note: expected one argument`**
-Il valore inizia con `-`: scrivilo come `--note=-valore`.
+The value starts with `-`: write it as `--note=-value`.
 
-**Qualcosa non torna e vuoi più dettagli**
+**Something is off and you want more details**
 
 ```bash
-hsm --debug <comando>
+hsm --debug <command>
 ```
 
 ---
 
-## Sviluppo
+## Development
 
 ```bash
 uv sync
@@ -654,85 +657,86 @@ uv sync
 .venv/bin/pytest --cov=hsm --cov-report=term-missing
 ```
 
-### Test che toccano il sistema reale (opzionali)
+### Tests that touch the real system (optional)
 
-Sono saltati per default. Vanno abilitati uno alla volta:
+They are skipped by default. Enable them one at a time:
 
-| Variabile | Cosa fa |
+| Variable | What it does |
 |---|---|
-| `HSM_KEYCHAIN_TESTS=1` | Crea, legge e cancella un item `hsm-test` nel login keychain |
-| `HSM_TOUCHID_TESTS=1` | Mostra un vero prompt Touch ID (aggiungi `-s` per vedere i messaggi) |
-| `HSM_CLIPBOARD_TESTS=1` | **Sovrascrive i tuoi appunti** per circa 4 secondi |
-| `HSM_SSHD_TESTS=1` | Avvia un `sshd` temporaneo come utente normale su `127.0.0.1` e verifica il percorso della password con il vero ssh |
+| `HSM_KEYCHAIN_TESTS=1` | Creates, reads and deletes an `hsm-test` item in the login keychain |
+| `HSM_TOUCHID_TESTS=1` | Shows a real Touch ID prompt (add `-s` to see the messages) |
+| `HSM_CLIPBOARD_TESTS=1` | **Overwrites your clipboard** for about 4 seconds |
+| `HSM_SSHD_TESTS=1` | Starts a temporary `sshd` as a normal user on `127.0.0.1` and checks the password path with the real ssh |
 
 ```bash
 HSM_SSHD_TESTS=1 .venv/bin/pytest tests/test_askpass.py -k real_ssh
 ```
 
-Altri test usano strumenti veri senza rischi:
-- `ssh -G`, che risolve la configurazione senza collegarsi;
-- l'helper `hsm-askpass` installato, lanciato come lo lancerebbe ssh;
-- il watchdog degli appunti avviato davvero, che legge soltanto.
+Other tests use real tools with no risk:
+- `ssh -G`, which resolves the configuration without connecting;
+- the installed `hsm-askpass` helper, launched the way ssh would launch it;
+- the clipboard watchdog actually started, which only reads.
 
-### Struttura
+### Layout
 
 ```text
 src/hsm/
-├── errors.py      errori di dominio, excepthook senza variabili locali
-├── secret.py      contenitore per segreti: repr redatto, azzeramento esplicito
-├── fsutil.py      permessi 0600/0700, scrittura atomica, lock tra processi
-├── vault.py       formato di vault.enc, Argon2id, AES-256-GCM, rekey
-├── keychain.py    chiave del vault nel login keychain via `security -i`
-├── touchid.py     controllo di presenza con LocalAuthentication
-├── unlock.py      Touch ID + Keychain, oppure master password
-├── inventory.py   hosts.toml: modello Host, validazione, rinomina
-├── state.py       state.toml: ultimo uso per host
-├── sshconfig.py   blocco tra i marker in ~/.ssh/config
-├── askpass.py     password per ssh via SSH_ASKPASS (server + helper hsm-askpass)
-├── connect.py     argomenti di ssh, ProxyJump, sessione con askpass
-├── clipboard.py   appunti con cancellazione automatica (hsm pw get)
-├── picker.py      selettore: fzf o lista numerata
-└── cli.py         riga di comando: collega i moduli
+├── errors.py      domain errors, excepthook without local variables
+├── secret.py      container for secrets: redacted repr, explicit wipe
+├── fsutil.py      0600/0700 permissions, atomic writes, inter-process lock
+├── vault.py       vault.enc format, Argon2id, AES-256-GCM, rekey
+├── keychain.py    vault key in the login keychain via `security -i`
+├── touchid.py     presence check with LocalAuthentication
+├── unlock.py      Touch ID + Keychain, or master password
+├── inventory.py   hosts.toml: Host model, validation, rename
+├── state.py       state.toml: last use per host
+├── sshconfig.py   block between the markers in ~/.ssh/config
+├── askpass.py     password for ssh via SSH_ASKPASS (server + hsm-askpass helper)
+├── connect.py     ssh arguments, ProxyJump, session with askpass
+├── clipboard.py   clipboard with automatic clearing (hsm pw get)
+├── picker.py      picker: fzf or numbered list
+└── cli.py         command line: wires the modules together
 ```
 
-Le dipendenze vanno in una sola direzione, dal basso verso l'alto.
-`vault.py` non sa nulla di Keychain o prompt: riceve una password e
-restituisce una chiave, oppure riceve una chiave e legge o scrive.
+Dependencies go in one direction only, from the bottom up. `vault.py`
+knows nothing about Keychain or prompts: it receives a password and returns
+a key, or receives a key and reads or writes.
 
-### Regole del progetto
+### Project rules
 
-- **Un modulo alla volta, in TDD:** prima i test, che devono fallire, poi il
-  codice.
-- **Ogni scelta crittografica ha un commento** che spiega perché.
-- **Mai crittografia fatta a mano:** solo `cryptography`.
-- **Mai `except` generici che silenziano gli errori;** mai password in
-  chiaro su disco, nemmeno temporaneamente.
-- **Nessuna chiamata di rete** fuori da ssh; nessuna GUI, TUI o web server.
+- **One module at a time, with TDD:** tests first, which must fail, then
+  the code.
+- **Every cryptographic choice has a comment** explaining why.
+- **Never hand-made cryptography:** only `cryptography`.
+- **Never generic `except`s that silence errors;** never plaintext
+  passwords on disk, not even temporarily.
+- **No network calls** outside ssh; no GUI, TUI or web server.
 
-Le specifiche originali sono in [SPEC.md](SPEC.md). Rispetto a quelle, hsm
-usa `SSH_ASKPASS` al posto di `sshpass` e ha in più il campo `auth` in
-`hosts.toml`: due scelte discusse e approvate durante lo sviluppo.
+The original specification is in [SPEC.md](SPEC.md). Compared to it, hsm
+uses `SSH_ASKPASS` instead of `sshpass` and adds the `auth` field to
+`hosts.toml`: two choices discussed and approved during development.
 
 ---
 
-## Disinstallazione
+## Uninstalling
 
 ```bash
 uv tool uninstall hsm
 ```
 
-Per togliere anche i dati, prima rimuovi la chiave dal Keychain:
+To remove the data too, first remove the key from the Keychain:
 
 ```bash
 security delete-generic-password -s hsm
 ```
 
-Poi cancella la directory di hsm, **dopo aver controllato** che non ti
-servano più le password che contiene:
+Then delete the hsm directory, **after checking** that you no longer need
+the passwords it contains:
 
 ```bash
 rm -r ~/.config/hsm
 ```
 
-Infine togli a mano da `~/.ssh/config` il blocco tra `# >>> hsm begin` e
-`# <<< hsm end`, e se vuoi i file `~/.ssh/config.hsm-backup-*`.
+Finally, remove by hand from `~/.ssh/config` the block between
+`# >>> hsm begin` and `# <<< hsm end`, and if you like the
+`~/.ssh/config.hsm-backup-*` files.

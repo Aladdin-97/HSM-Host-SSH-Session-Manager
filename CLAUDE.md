@@ -1,4 +1,4 @@
 # hsm
-- Segui SPEC.md. Un modulo alla volta, e fermati dopo ognuno: l'utente vuole leggere e capire il codice.
-- Non iniziare il modulo successivo senza ok esplicito.
-- Per ogni scelta crittografica, due righe sul perché.
+- Follow SPEC.md. One module at a time, and stop after each one: the user wants to read and understand the code.
+- Do not start the next module without an explicit ok.
+- For every cryptographic choice, two lines on why.

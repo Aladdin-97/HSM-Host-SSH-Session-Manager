@@ -1,14 +1,14 @@
-"""Controllo di presenza dell'utente con Touch ID (LocalAuthentication via pyobjc).
+"""User presence check with Touch ID (LocalAuthentication via pyobjc).
 
-Serve a una cosa sola: chiedere "sei davvero tu?" prima di leggere la chiave
-del vault dal Keychain. Il risultato è un sì/no, non un segreto.
+It serves a single purpose: asking "is it really you?" before reading the
+vault key from the Keychain. The result is a yes/no, not a secret.
 
-Limite da tenere a mente: questo è un controllo d'interfaccia, non un
-confine di sicurezza. L'item nel Keychain non è legato crittograficamente
-alla biometria (servirebbe un binario firmato con entitlement), quindi un
-processo malevolo con il tuo utente può saltare questo controllo e leggere
-l'item direttamente. Protegge da usi distratti o da chi trova il Mac
-sbloccato e lancia `hsm`, non da malware.
+Limitation to keep in mind: this is a UI check, not a security boundary.
+The Keychain item is not cryptographically bound to biometrics (that would
+need a signed binary with an entitlement), so a malicious process running as
+your user can skip this check and read the item directly. It protects
+against careless use or someone who finds the Mac unlocked and runs `hsm`,
+not against malware.
 """
 
 import threading
@@ -16,44 +16,44 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Any
 
-# LAPolicyDeviceOwnerAuthentication: Touch ID, con ripiego su Apple Watch o
-# sulla password di macOS. Preferita alla variante "solo biometria" perché
-# funziona anche a coperchio chiuso o con il sensore temporaneamente bloccato.
+# LAPolicyDeviceOwnerAuthentication: Touch ID, falling back to Apple Watch or
+# the macOS password. Preferred over the "biometrics only" variant because
+# it also works with the lid closed or with the sensor temporarily locked out.
 POLICY = 2
 
 LA_ERROR_DOMAIN = "com.apple.LocalAuthentication"
 
-# Codici LAError che significano "qui non si può chiedere", non "l'utente
-# ha detto no": in questi casi unlock ripiega sulla master password.
+# LAError codes that mean "we can't ask here", not "the user said no":
+# in these cases unlock falls back to the master password.
 _UNAVAILABLE_CODES = frozenset(
     {
         -5,  # LAErrorPasscodeNotSet
         -6,  # LAErrorBiometryNotAvailable
         -7,  # LAErrorBiometryNotEnrolled
         -10,  # LAErrorInvalidContext
-        -1004,  # LAErrorNotInteractive (es. sessione SSH, nessuna GUI)
+        -1004,  # LAErrorNotInteractive (e.g. SSH session, no GUI)
     }
 )
 
-# Se il dialog non riceve risposta (utente lontano), lo chiudiamo.
+# If the dialog gets no answer (user away), we close it.
 DEFAULT_TIMEOUT_S = 60.0
 
 ContextFactory = Callable[[], Any]
 
 
 class Presence(Enum):
-    """Esito del controllo."""
+    """Outcome of the check."""
 
-    GRANTED = "granted"  # l'utente si è autenticato
-    DENIED = "denied"  # l'utente ha annullato, ha fallito o non ha risposto
-    UNAVAILABLE = "unavailable"  # Touch ID non utilizzabile qui
+    GRANTED = "granted"  # the user authenticated
+    DENIED = "denied"  # the user cancelled, failed or didn't answer
+    UNAVAILABLE = "unavailable"  # Touch ID not usable here
 
 
 def _pyobjc_errors() -> tuple[type[Exception], ...]:
-    """Le eccezioni con cui pyobjc riporta un errore Objective-C.
+    """The exceptions pyobjc uses to report an Objective-C error.
 
-    NSInvalidArgumentException diventa ValueError; le altre NSException
-    diventano objc.error. Catturiamo solo queste, non Exception in generale.
+    NSInvalidArgumentException becomes ValueError; other NSExceptions
+    become objc.error. We catch only these, not Exception in general.
     """
     try:
         import objc
@@ -63,9 +63,9 @@ def _pyobjc_errors() -> tuple[type[Exception], ...]:
 
 
 def _default_context() -> Any:
-    """Crea un LAContext, o None se pyobjc/LocalAuthentication non c'è."""
+    """Create an LAContext, or None if pyobjc/LocalAuthentication is missing."""
     try:
-        import LocalAuthentication  # import pigro: solo macOS, solo se serve
+        import LocalAuthentication  # lazy import: macOS only, only when needed
     except ImportError:
         return None
     return LocalAuthentication.LAContext.alloc().init()
@@ -77,15 +77,15 @@ def require_user_presence(
     context_factory: ContextFactory | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
 ) -> Presence:
-    """Mostra il prompt di sistema e attende la risposta dell'utente.
+    """Show the system prompt and wait for the user's answer.
 
-    `reason` compare nel dialog ("python3.12 vuole <reason>"). Non solleva
-    eccezioni per i casi previsti: il chiamante decide cosa fare con
-    DENIED e UNAVAILABLE. Restituisce GRANTED solo su successo esplicito.
-    Un errore di pyobjc vale UNAVAILABLE: unlock ripiega sulla password.
+    `reason` appears in the dialog ("python3.12 is trying to <reason>").
+    It doesn't raise for the expected cases: the caller decides what to do
+    with DENIED and UNAVAILABLE. Returns GRANTED only on explicit success.
+    A pyobjc error counts as UNAVAILABLE: unlock falls back to the password.
     """
     if not reason:
-        raise ValueError("reason non può essere vuoto")
+        raise ValueError("reason cannot be empty")
     ctx = (context_factory or _default_context)()
     if ctx is None:
         return Presence.UNAVAILABLE
@@ -94,8 +94,8 @@ def require_user_presence(
     except _pyobjc_errors():
         return Presence.UNAVAILABLE
     finally:
-        # Chiude un eventuale dialog ancora aperto (timeout) e impedisce di
-        # riusare l'autenticazione appena fatta per altre richieste.
+        # Closes any dialog still open (timeout) and prevents reusing the
+        # authentication just performed for other requests.
         ctx.invalidate()
 
 
@@ -104,28 +104,28 @@ def _evaluate(ctx: Any, reason: str, timeout: float) -> Presence:
     if not can:
         return Presence.UNAVAILABLE
 
-    # evaluatePolicy è asincrono: chiama `reply` su una coda di sistema.
-    # Lo trasformiamo in una chiamata bloccante con un Event.
+    # evaluatePolicy is asynchronous: it calls `reply` on a system queue.
+    # We turn it into a blocking call with an Event.
     done = threading.Event()
-    # Valori di partenza "chiusi": se la callback si interrompe a metà,
-    # quello che resta qui significa DENIED, mai GRANTED.
+    # "Closed" starting values: if the callback breaks off halfway,
+    # whatever is left here means DENIED, never GRANTED.
     outcome: dict[str, Any] = {"success": False, "code": None}
 
     def reply(success: bool, error: Any) -> None:
         try:
             if error is not None and error.domain() == LA_ERROR_DOMAIN:
                 outcome["code"] = error.code()
-            # success per ultimo: lo scriviamo solo se tutto il resto è andato.
+            # success last: we write it only if everything else went through.
             outcome["success"] = bool(success)
         finally:
-            # Anche se qualcosa sopra solleva, sblocchiamo il thread
-            # principale invece di lasciarlo appeso fino al timeout.
+            # Even if something above raises, we release the main thread
+            # instead of leaving it hanging until the timeout.
             done.set()
 
     ctx.evaluatePolicy_localizedReason_reply_(POLICY, reason, reply)
     if not done.wait(timeout):
-        # Una risposta che arriva dopo il timeout viene ignorata: il dict
-        # non viene più letto, e invalidate() chiude comunque il dialog.
+        # A reply that arrives after the timeout is ignored: the dict is no
+        # longer read, and invalidate() closes the dialog anyway.
         return Presence.DENIED
     if outcome["success"]:
         return Presence.GRANTED

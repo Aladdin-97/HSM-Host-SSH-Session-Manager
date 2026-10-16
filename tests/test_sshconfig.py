@@ -69,13 +69,13 @@ def test_render_sorts_hosts() -> None:
 
 
 def test_render_doubles_percent_in_hostname() -> None:
-    # In HostName ssh espande %h, %%...: un "%" singolo fa fallire ssh.
+    # In HostName ssh expands %h, %%...: a single "%" makes ssh fail.
     block = render([Host(alias="ll", hostname="fe80::1%en0")])
     assert "HostName fe80::1%%en0" in block
 
 
 def test_render_closes_with_host_star() -> None:
-    # Le righe dopo il blocco devono tornare globali (vedi test con ssh -G).
+    # Lines after the block must return to global scope (see the ssh -G tests).
     lines = render([WEB01]).splitlines()
     assert lines[-2] == "Host *"
 
@@ -102,7 +102,7 @@ def test_creates_missing_file_without_backup(cfg: Path) -> None:
 
 
 def test_inserts_block_at_top_and_keeps_rest_byte_for_byte(cfg: Path) -> None:
-    original = "# miei host\nHost old\n    HostName old.example.com\n"
+    original = "# my hosts\nHost old\n    HostName old.example.com\n"
     _write(cfg, original)
     apply(cfg, render([WEB01]), now=NOW)
     text = cfg.read_text()
@@ -169,10 +169,10 @@ def test_file_without_trailing_newline_is_preserved(cfg: Path) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        f"{BEGIN}\nHost x\n",  # inizio senza fine
-        f"Host x\n{END}\n",  # fine senza inizio
-        f"{END}\n{BEGIN}\n",  # ordine invertito
-        f"{BEGIN}\n{END}\n{BEGIN}\n{END}\n",  # due blocchi
+        f"{BEGIN}\nHost x\n",  # begin without end
+        f"Host x\n{END}\n",  # end without begin
+        f"{END}\n{BEGIN}\n",  # swapped order
+        f"{BEGIN}\n{END}\n{BEGIN}\n{END}\n",  # two blocks
     ],
 )
 def test_malformed_markers_refuse_and_leave_file_untouched(cfg: Path, text: str) -> None:
@@ -209,9 +209,9 @@ def test_non_utf8_config_is_clean_error(cfg: Path) -> None:
         apply(cfg, render([WEB01]), now=NOW)
 
 
-# --- verifica con il vero ssh (ssh -G non si collega) ------------------------
+# --- check against the real ssh (ssh -G does not connect) -------------------
 
-needs_ssh = pytest.mark.skipif(not os.path.exists(SSH), reason="ssh non disponibile")
+needs_ssh = pytest.mark.skipif(not os.path.exists(SSH), reason="ssh not available")
 
 
 def _ssh_g(cfg: Path, target: str) -> dict[str, str]:
@@ -243,8 +243,8 @@ def test_ssh_resolves_ipv6_zone(cfg: Path) -> None:
 
 @needs_ssh
 def test_user_global_options_stay_global(cfg: Path) -> None:
-    # Il caso che ha motivato "Host *": un'opzione globale in cima al file
-    # dell'utente, dopo l'inserimento del blocco, deve valere ancora per tutti.
+    # The case that motivated "Host *": a global option at the top of the
+    # user's file must still apply to everyone after the block is inserted.
     _write(cfg, "ServerAliveInterval 42\n")
     apply(cfg, render([WEB01]), now=NOW)
     assert _ssh_g(cfg, "other.example.com")["serveraliveinterval"] == "42"
@@ -271,7 +271,7 @@ def test_gives_up_after_too_many_backups_in_one_second(cfg: Path) -> None:
     assert cfg.read_text() == "Host a\n"
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings ------------------------------------------------
 
 
 @pytest.mark.parametrize("bad", ["a b", 'a"b', "a#b", "a\\b", "a$b", "a=b"])
@@ -295,8 +295,8 @@ def test_quoted_value_guard_allows_spaces_but_not_quotes() -> None:
     [(BEGIN + " ", END), ("  " + BEGIN, END), (BEGIN, END + "\t"), (BEGIN + "\r", END + "\r")],
 )
 def test_markers_tolerate_surrounding_whitespace(cfg: Path, marker_begin: str, marker_end: str) -> None:
-    # Gli editor aggiungono spazi: un marker "quasi uguale" non deve far
-    # nascere un secondo blocco lasciando vivo quello vecchio.
+    # Editors add whitespace: an "almost equal" marker must not spawn a
+    # second block while leaving the old one active.
     before, after = "Host a\n", "Host z\n"
     _write(cfg, f"{before}{marker_begin}\nHost stale\n{marker_end}\n{after}")
     apply(cfg, render([WEB01]), now=NOW)
@@ -306,8 +306,8 @@ def test_markers_tolerate_surrounding_whitespace(cfg: Path, marker_begin: str, m
 
 
 def test_only_newline_splits_lines_like_ssh(cfg: Path) -> None:
-    # Per ssh un form feed non va a capo: questa riga è un commento, non un marker.
-    original = f"# nota\x0c{BEGIN}\nHost a\n"
+    # For ssh a form feed is not a line break: this line is a comment, not a marker.
+    original = f"# note\x0c{BEGIN}\nHost a\n"
     _write(cfg, original)
     apply(cfg, render([WEB01]), now=NOW)
     assert cfg.read_text().endswith(original)
@@ -323,16 +323,16 @@ def test_concurrent_edit_is_detected_and_not_overwritten(
 
     def backup_then_someone_edits(path: Path, content: bytes, now: datetime) -> Path:
         result = real_backup(path, content, now)
-        _write(cfg, "Host a\nHost edited-meanwhile\n")  # un editor salva ora
+        _write(cfg, "Host a\nHost edited-meanwhile\n")  # an editor saves now
         return result
 
     monkeypatch.setattr(sshconfig, "_backup", backup_then_someone_edits)
-    with pytest.raises(SshConfigError, match="modificato"):
+    with pytest.raises(SshConfigError, match="modified"):
         apply(cfg, render([WEB01]), now=NOW)
     assert "edited-meanwhile" in cfg.read_text()
 
 
 def test_identity_file_comes_with_identities_only() -> None:
-    # Senza, ssh prova prima tutte le chiavi dell'agent e il server può
-    # chiudere per "Too many authentication failures" prima di arrivare a -i.
+    # Without it, ssh first tries all the agent's keys and the server may
+    # disconnect with "Too many authentication failures" before reaching -i.
     assert '    IdentityFile "~/.ssh/id_ed25519"\n    IdentitiesOnly yes\n' in render([WEB01])

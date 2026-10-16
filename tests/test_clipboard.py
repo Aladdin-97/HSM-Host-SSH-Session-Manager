@@ -23,7 +23,7 @@ NOW = 1_800_000_000.0
 
 @dataclass
 class FakePasteboard:
-    """Imita NSPasteboard: tipi dichiarati, contenuti e changeCount."""
+    """Mimics NSPasteboard: declared types, contents and changeCount."""
 
     count: int = 100
     contents: dict[str, str] = field(default_factory=dict)
@@ -53,7 +53,7 @@ class FakePasteboard:
 
 @dataclass
 class FakeSpawn:
-    """Simula il watchdog: se `ready`, scrive il byte di conferma sul fd."""
+    """Simulates the watchdog: if `ready`, writes the confirmation byte to the fd."""
 
     ready: bool = True
     raises: BaseException | None = None
@@ -81,13 +81,13 @@ def _clip(pb: FakePasteboard, spawn: FakeSpawn, **kwargs: Any) -> Clipboard:
     return Clipboard(pasteboard=pb, spawn=spawn, clock=lambda: NOW, **kwargs)
 
 
-# --- copia ------------------------------------------------------------------
+# --- copy -------------------------------------------------------------------
 
 
 def test_copies_text_and_marks_it_concealed_and_transient(pb: FakePasteboard, spawn: FakeSpawn) -> None:
     _clip(pb, spawn).copy_with_autoclear(Secret(b"s3cret"))
     assert pb.contents[STRING_TYPE] == "s3cret"
-    # Convenzione nspasteboard.org: i gestori di cronologia non la salvano.
+    # nspasteboard.org convention: history managers don't save it.
     assert CONCEALED_TYPE in pb.declared and TRANSIENT_TYPE in pb.declared
 
 
@@ -96,9 +96,9 @@ def test_spawns_detached_watchdog_with_change_count_and_deadline(pb: FakePastebo
     argv, kwargs = spawn.calls[0]
     assert argv[:4] == [sys.executable, "-I", "-m", "hsm.clipboard"]
     assert argv[argv.index("--expect") + 1] == str(pb.count)
-    # Scadenza assoluta su orologio reale: vale anche se il Mac va in stop.
+    # Absolute deadline on the wall clock: holds even if the Mac goes to sleep.
     assert float(argv[argv.index("--deadline") + 1]) == NOW + 30
-    # Al watchdog non arriva nulla del segreto: né il testo né un suo hash.
+    # Nothing of the secret reaches the watchdog: neither the text nor a hash of it.
     assert not any("s3cret" in a for a in argv)
     assert kwargs["start_new_session"] is True
     assert kwargs["stdin"] is subprocess.DEVNULL
@@ -116,7 +116,7 @@ def test_ready_pipe_is_closed_in_parent(pb: FakePasteboard, spawn: FakeSpawn) ->
 def test_expected_count_is_the_one_returned_by_our_write(pb: FakePasteboard, spawn: FakeSpawn) -> None:
     _clip(pb, spawn).copy_with_autoclear(Secret(b"x"))
     argv = spawn.calls[0][0]
-    assert int(argv[argv.index("--expect") + 1]) == 101  # da declareTypes, non letto dopo
+    assert int(argv[argv.index("--expect") + 1]) == 101  # from declareTypes, not read afterwards
 
 
 def test_other_app_writing_during_copy_is_detected(
@@ -126,27 +126,27 @@ def test_other_app_writing_during_copy_is_detected(
 
     def racing(value: str, kind: str) -> bool:
         ok = original(value, kind)
-        pb.count += 1  # un'altra app scrive negli appunti proprio ora
+        pb.count += 1  # another app writes to the clipboard right now
         return ok
 
     monkeypatch.setattr(pb, "setString_forType_", racing)
-    with pytest.raises(HsmError, match="altra app"):
+    with pytest.raises(HsmError, match="Another app"):
         _clip(pb, spawn).copy_with_autoclear(Secret(b"x"))
     assert spawn.calls == []
 
 
 def test_watchdog_not_ready_clears_and_raises(pb: FakePasteboard) -> None:
-    # Il processo è partito ma è morto all'avvio (es. import fallito):
-    # nessuno cancellerebbe la password, quindi la togliamo subito.
+    # The process started but died at startup (e.g. failed import):
+    # nobody would clear the password, so we remove it right away.
     spawn = FakeSpawn(ready=False)
-    with pytest.raises(HsmError, match="cancellazione"):
+    with pytest.raises(HsmError, match="clipboard clearing"):
         _clip(pb, spawn, ready_timeout=0.05).copy_with_autoclear(Secret(b"s3cret"))
     assert pb.contents == {}
 
 
 def test_spawn_failure_clears_and_raises(pb: FakePasteboard) -> None:
-    spawn = FakeSpawn(raises=OSError("fork fallita"))
-    with pytest.raises(HsmError, match="cancellazione"):
+    spawn = FakeSpawn(raises=OSError("fork failed"))
+    with pytest.raises(HsmError, match="clipboard clearing"):
         _clip(pb, spawn).copy_with_autoclear(Secret(b"s3cret"))
     assert pb.contents == {}
 
@@ -159,7 +159,7 @@ def test_ctrl_c_during_spawn_clears_and_propagates(pb: FakePasteboard) -> None:
 
 
 def test_unexpected_error_clears_and_becomes_hsm_error(pb: FakePasteboard) -> None:
-    spawn = FakeSpawn(raises=TypeError("sys.executable è None"))
+    spawn = FakeSpawn(raises=TypeError("sys.executable is None"))
     with pytest.raises(HsmError):
         _clip(pb, spawn).copy_with_autoclear(Secret(b"s3cret"))
     assert pb.contents == {}
@@ -169,17 +169,17 @@ def test_cleanup_does_not_wipe_a_newer_user_copy(pb: FakePasteboard) -> None:
     class UserCopiesThenFails(FakeSpawn):
         def __call__(self, argv: list[str], **kwargs: Any) -> None:
             pb.declareTypes_owner_([STRING_TYPE], None)
-            pb.setString_forType_("copiato dall'utente", STRING_TYPE)
-            raise OSError("fork fallita")
+            pb.setString_forType_("copied by the user", STRING_TYPE)
+            raise OSError("fork failed")
 
     with pytest.raises(HsmError):
         _clip(pb, UserCopiesThenFails()).copy_with_autoclear(Secret(b"s3cret"))
-    assert pb.contents == {STRING_TYPE: "copiato dall'utente"}
+    assert pb.contents == {STRING_TYPE: "copied by the user"}
 
 
 def test_write_failure_is_clean_error(pb: FakePasteboard, spawn: FakeSpawn, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pb, "setString_forType_", lambda value, kind: False)
-    with pytest.raises(HsmError, match="appunti"):
+    with pytest.raises(HsmError, match="clipboard"):
         _clip(pb, spawn).copy_with_autoclear(Secret(b"s3cret"))
     assert spawn.calls == []
 
@@ -214,14 +214,14 @@ def test_clear_if_unchanged_clears_our_value(pb: FakePasteboard) -> None:
 def test_clear_if_unchanged_respects_newer_copy(pb: FakePasteboard) -> None:
     expected = pb.count
     pb.count += 1
-    pb.contents = {STRING_TYPE: "altro"}
+    pb.contents = {STRING_TYPE: "other"}
     assert clear_if_unchanged(pb, expected=expected) is False
-    assert pb.contents == {STRING_TYPE: "altro"}
+    assert pb.contents == {STRING_TYPE: "other"}
 
 
 def test_main_waits_on_wall_clock_in_short_steps(pb: FakePasteboard) -> None:
-    # Simula 25 s di stop del Mac: l'orologio reale salta in avanti e il
-    # watchdog se ne accorge al passo successivo, senza aspettare altri 30 s.
+    # Simulates 25 s of Mac sleep: the wall clock jumps forward and the
+    # watchdog notices at the next step, without waiting another 30 s.
     now = [NOW]
     slept: list[float] = []
 
@@ -273,9 +273,9 @@ def test_main_rejects_bad_arguments(pb: FakePasteboard) -> None:
 
 
 def test_real_watchdog_process_signals_ready() -> None:
-    # Il vero `python -I -m hsm.clipboard`, avviato dalla root del disco.
-    # --expect -1 non coincide mai con il vero changeCount: gli appunti
-    # vengono solo letti, mai toccati.
+    # The real `python -I -m hsm.clipboard`, started from the disk root.
+    # --expect -1 never equals the real changeCount: the clipboard is
+    # only read, never touched.
     r, w = os.pipe()
     try:
         proc = subprocess.Popen(
@@ -297,7 +297,7 @@ def test_real_watchdog_process_signals_ready() -> None:
 
 @pytest.mark.skipif(
     os.environ.get("HSM_CLIPBOARD_TESTS") != "1",
-    reason="sovrascrive gli appunti reali: abilita con HSM_CLIPBOARD_TESTS=1",
+    reason="overwrites the real clipboard: enable with HSM_CLIPBOARD_TESTS=1",
 )
 def test_real_pasteboard_autoclear() -> None:
     import AppKit

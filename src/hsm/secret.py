@@ -1,15 +1,15 @@
-"""Contenitore per segreti (password, chiavi) che limita le fughe accidentali.
+"""Container for secrets (passwords, keys) that limits accidental leaks.
 
-Cosa fa:
-- `repr`/`str`/f-string non mostrano mai il contenuto, quindi un segreto
-  finito in un log, in un print di debug o in un traceback resta coperto;
-- il contenuto vive in un `bytearray` (mutabile), che `wipe()` azzera;
-- vieta pickle e copy, per non moltiplicare le copie in memoria.
+What it does:
+- `repr`/`str`/f-strings never show the content, so a secret that ends up
+  in a log, a debug print or a traceback stays hidden;
+- the content lives in a (mutable) `bytearray`, which `wipe()` zeroes;
+- it forbids pickle and copy, so copies in memory don't multiply.
 
-Cosa NON può fare: Python non garantisce la cancellazione della memoria.
-Ogni `bytes`/`str` creato a partire dal segreto (per esempio l'output di
-`getpass` o di una decifratura) è immutabile e resta in memoria finché il
-garbage collector non lo libera. `Secret` riduce il problema, non lo elimina.
+What it CANNOT do: Python does not guarantee that memory is erased.
+Every `bytes`/`str` created from the secret (for example the output of
+`getpass` or of a decryption) is immutable and stays in memory until the
+garbage collector frees it. `Secret` reduces the problem, it doesn't remove it.
 """
 
 import hmac
@@ -18,36 +18,36 @@ from typing import Self
 
 
 class Secret:
-    """Byte sensibili con rappresentazione redatta e azzeramento esplicito."""
+    """Sensitive bytes with a redacted representation and explicit zeroing."""
 
     __slots__ = ("_buf", "_wiped")
 
     def __init__(self, data: bytes | bytearray) -> None:
-        # Se riceve un bytearray ne prende possesso (niente copia), così wipe()
-        # azzera proprio il buffer del chiamante. Da bytes immutabili invece
-        # è obbligato a copiare, e l'originale non è azzerabile.
+        # Given a bytearray it takes ownership (no copy), so wipe() zeroes
+        # the caller's own buffer. From immutable bytes, instead, it has to
+        # copy, and the original cannot be zeroed.
         self._buf = data if isinstance(data, bytearray) else bytearray(data)
         self._wiped = False
 
     @classmethod
     def from_str(cls, text: str) -> Self:
-        """Crea un Secret dalla codifica UTF-8 di `text` (che resta in memoria)."""
+        """Create a Secret from the UTF-8 encoding of `text` (which stays in memory)."""
         return cls(bytearray(text.encode("utf-8")))
 
     def view(self) -> memoryview:
-        """Vista in sola lettura del contenuto, senza copiarlo.
+        """Read-only view of the content, without copying it.
 
-        `cryptography` accetta direttamente un memoryview, quindi la chiave
-        arriva alla libreria senza passare da un `bytes` intermedio.
+        `cryptography` accepts a memoryview directly, so the key reaches
+        the library without going through an intermediate `bytes`.
         """
         if self._wiped:
-            raise ValueError("Secret già azzerato")
+            raise ValueError("Secret already wiped")
         return memoryview(self._buf).toreadonly()
 
     def wipe(self) -> None:
-        """Sovrascrive il buffer con zeri. Idempotente."""
-        # Assegnazione a slice della stessa lunghezza: scrive nello stesso
-        # buffer invece di riallocarne uno nuovo.
+        """Overwrite the buffer with zeros. Idempotent."""
+        # Slice assignment of the same length: writes into the same
+        # buffer instead of allocating a new one.
         self._buf[:] = bytes(len(self._buf))
         self._wiped = True
 
@@ -57,10 +57,10 @@ class Secret:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Secret):
             return NotImplemented
-        # Confronto a tempo costante: non rivela dopo quanti byte differiscono.
+        # Constant-time comparison: doesn't reveal after how many bytes they differ.
         return hmac.compare_digest(self._buf, other._buf)
 
-    __hash__ = None  # type: ignore[assignment]  # mutabile: non usarlo come chiave
+    __hash__ = None  # type: ignore[assignment]  # mutable: don't use it as a key
 
     def __repr__(self) -> str:
         return "<Secret redacted>"
@@ -68,8 +68,8 @@ class Secret:
     __str__ = __repr__
 
     def __reduce_ex__(self, protocol: object) -> object:
-        # pickle, copy.copy e copy.deepcopy passano tutti da qui.
-        raise TypeError("Secret non può essere serializzato o copiato")
+        # pickle, copy.copy and copy.deepcopy all go through here.
+        raise TypeError("Secret cannot be serialized or copied")
 
     def __enter__(self) -> Self:
         return self
@@ -82,7 +82,7 @@ class Secret:
     ) -> None:
         self.wipe()
 
-    # Volutamente nessun __del__ che azzeri il buffer: una view() può
-    # sopravvivere al Secret da cui è nata (es. `bytes(derive().view())`),
-    # e azzerarla alla distruzione trasformerebbe in silenzio una chiave in
-    # 32 zeri. Si azzera solo esplicitamente, con wipe() o con `with`.
+    # Deliberately no __del__ that zeroes the buffer: a view() can outlive
+    # the Secret it came from (e.g. `bytes(derive().view())`), and zeroing
+    # it on destruction would silently turn a key into 32 zeros. Zeroing
+    # happens only explicitly, with wipe() or with `with`.

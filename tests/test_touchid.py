@@ -9,7 +9,7 @@ import pytest
 from hsm import touchid
 from hsm.touchid import POLICY, Presence, require_user_presence
 
-# Codici LAError (LocalAuthentication/LAError.h).
+# LAError codes (LocalAuthentication/LAError.h).
 AUTH_FAILED = -1
 USER_CANCEL = -2
 USER_FALLBACK = -3
@@ -36,16 +36,16 @@ class FakeNSError:
 
 @dataclass
 class FakeContext:
-    """Imita LAContext: risponde a copione, registra le chiamate."""
+    """Mimics LAContext: replies from a script, records calls."""
 
     can_evaluate: bool = True
     can_error: int | None = None
     success: bool = True
     error: int | None = None
-    reply: bool = True  # False: non chiama mai la callback (simula un blocco)
-    reply_error: object | None = None  # passato così com'è alla callback
-    raise_on: str | None = None  # "can" | "evaluate": simula un'eccezione pyobjc
-    threaded: bool = False  # True: callback su un altro thread, come nel sistema
+    reply: bool = True  # False: never calls the callback (simulates a hang)
+    reply_error: object | None = None  # passed as is to the callback
+    raise_on: str | None = None  # "can" | "evaluate": simulates a pyobjc exception
+    threaded: bool = False  # True: callback on another thread, as in the system
     calls: list[tuple[int, str]] = field(default_factory=list)
     invalidated: bool = False
     threads: list[threading.Thread] = field(default_factory=list)
@@ -79,18 +79,18 @@ class FakeContext:
 
 
 def _ask(ctx: FakeContext, **kwargs: float) -> Presence:
-    return require_user_presence("sbloccare il vault", context_factory=lambda: ctx, **kwargs)
+    return require_user_presence("unlock the vault", context_factory=lambda: ctx, **kwargs)
 
 
 def test_granted() -> None:
     ctx = FakeContext()
     assert _ask(ctx) is Presence.GRANTED
-    assert ctx.calls == [(POLICY, "sbloccare il vault")]
+    assert ctx.calls == [(POLICY, "unlock the vault")]
 
 
 def test_policy_is_device_owner_authentication() -> None:
-    # Touch ID con ripiego sulla password di macOS (o Apple Watch):
-    # funziona anche a coperchio chiuso.
+    # Touch ID falling back to the macOS password (or Apple Watch):
+    # it also works with the lid closed.
     assert POLICY == 2
 
 
@@ -107,7 +107,7 @@ def test_refusals_are_denied(code: int) -> None:
 
 
 def test_not_interactive_is_unavailable() -> None:
-    # Es. sessione SSH verso il Mac: nessuno può toccare il sensore.
+    # E.g. SSH session to the Mac: nobody can touch the sensor.
     assert _ask(FakeContext(success=False, error=NOT_INTERACTIVE)) is Presence.UNAVAILABLE
 
 
@@ -129,35 +129,35 @@ def test_context_is_invalidated_after_use() -> None:
 
 def test_missing_framework_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(touchid, "_default_context", lambda: None)
-    assert require_user_presence("sbloccare il vault") is Presence.UNAVAILABLE
+    assert require_user_presence("unlock the vault") is Presence.UNAVAILABLE
 
 
 def test_empty_reason_is_rejected() -> None:
-    # LAContext solleva un'eccezione Objective-C con un reason vuoto.
+    # LAContext raises an Objective-C exception with an empty reason.
     with pytest.raises(ValueError):
         require_user_presence("", context_factory=FakeContext)
 
 
 def test_never_fails_open() -> None:
-    # Qualsiasi risultato diverso da successo esplicito non è GRANTED.
+    # Any result other than explicit success is not GRANTED.
     for code in [AUTH_FAILED, USER_CANCEL, -4, -9, NOT_INTERACTIVE, -999, None]:
         assert _ask(FakeContext(success=False, error=code)) is not Presence.GRANTED
 
 
 @pytest.mark.skipif(
     os.environ.get("HSM_TOUCHID_TESTS") != "1",
-    reason="mostra un prompt Touch ID reale: abilita con HSM_TOUCHID_TESTS=1",
+    reason="shows a real Touch ID prompt: enable with HSM_TOUCHID_TESTS=1",
 )
 def test_real_touch_id_prompt() -> None:
-    print("\nAppoggia il dito sul sensore (o annulla per verificare DENIED)...")
-    result = require_user_presence("verificare il test di hsm")
-    print(f"risultato: {result}")
+    print("\nPlace your finger on the sensor (or cancel to check DENIED)...")
+    result = require_user_presence("verify the hsm test")
+    print(f"result: {result}")
     assert result in (Presence.GRANTED, Presence.DENIED)
 
 
 def test_default_context_is_a_real_lacontext() -> None:
     pytest.importorskip("LocalAuthentication")
-    # Crea il contesto senza valutare nessuna policy: nessun prompt.
+    # Creates the context without evaluating any policy: no prompt.
     ctx = touchid._default_context()
     assert ctx is not None
     assert type(ctx).__name__ == "LAContext"
@@ -167,12 +167,12 @@ def test_default_context_is_a_real_lacontext() -> None:
 def test_default_context_without_pyobjc_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys
 
-    # None in sys.modules fa fallire l'import con ImportError.
+    # None in sys.modules makes the import fail with ImportError.
     monkeypatch.setitem(sys.modules, "LocalAuthentication", None)
     assert touchid._default_context() is None
 
 
-# --- rilievi della security review --------------------------------------------
+# --- security review findings ------------------------------------------------
 
 
 @pytest.mark.parametrize("where", ["can", "evaluate"])
@@ -186,18 +186,18 @@ def test_pyobjc_exceptions_become_unavailable(where: str) -> None:
 def test_broken_error_object_in_reply_does_not_hang_or_grant() -> None:
     class Broken:
         def domain(self) -> str:
-            raise RuntimeError("rotto")
+            raise RuntimeError("broken")
 
         def code(self) -> int:
-            raise RuntimeError("rotto")
+            raise RuntimeError("broken")
 
-    # La callback gira su un thread di sistema: se esplode lì, il thread
-    # principale non deve restare appeso fino al timeout, e niente GRANTED.
+    # The callback runs on a system thread: if it blows up there, the main
+    # thread must not hang until the timeout, and no GRANTED.
     ctx = FakeContext(success=True, reply_error=Broken(), threaded=True)
     start = time.monotonic()
     assert _ask(ctx, timeout=5) is Presence.DENIED
     assert time.monotonic() - start < 2
-    for t in ctx.threads:  # l'eccezione del thread resta in questo test
+    for t in ctx.threads:  # the thread's exception stays within this test
         t.join()
 
 

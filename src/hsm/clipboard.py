@@ -1,35 +1,35 @@
-"""Copia una password negli appunti e la cancella da sola dopo N secondi.
+"""Copies a password to the clipboard and clears it by itself after N seconds.
 
-Come funziona:
-1. scriviamo il testo con NSPasteboard (AppKit via pyobjc), dichiarando
-   anche due tipi "marcatore" della convenzione nspasteboard.org:
-   - org.nspasteboard.ConcealedType: il contenuto è riservato, non mostrarlo;
-   - org.nspasteboard.TransientType: non salvarlo nella cronologia.
-   I gestori di appunti più diffusi (Maccy, Raycast, Paste...) li rispettano;
-   `pbcopy` non permette di dichiararli.
-2. teniamo il `changeCount` restituito dalla nostra scrittura: macOS lo
-   incrementa a ogni scrittura negli appunti, da qualsiasi app.
-3. avviamo un piccolo processo staccato (`python -I -m hsm.clipboard`) che
-   aspetta fino a una scadenza e poi svuota gli appunti SOLO se il
-   `changeCount` è ancora il nostro: se nel frattempo hai copiato altro,
-   non lo tocca.
-4. il processo ci conferma di essere pronto scrivendo un byte su una pipe.
-   Se la conferma non arriva (es. è morto all'avvio), svuotiamo subito.
+How it works:
+1. we write the text with NSPasteboard (AppKit via pyobjc), also declaring
+   two "marker" types from the nspasteboard.org convention:
+   - org.nspasteboard.ConcealedType: the content is confidential, don't show it;
+   - org.nspasteboard.TransientType: don't save it in the history.
+   The most common clipboard managers (Maccy, Raycast, Paste...) honor them;
+   `pbcopy` cannot declare them.
+2. we keep the `changeCount` returned by our write: macOS increments it on
+   every clipboard write, from any app.
+3. we start a small detached process (`python -I -m hsm.clipboard`) that
+   waits until a deadline and then clears the clipboard ONLY if the
+   `changeCount` is still ours: if you copied something else meanwhile,
+   it leaves it alone.
+4. the process confirms it is ready by writing one byte to a pipe. If the
+   confirmation does not arrive (e.g. it died at startup), we clear at once.
 
-Al processo staccato passiamo solo il numero e la scadenza. Non riceve la
-password né un suo hash: un hash in chiaro negli argomenti (visibili con
-`ps`) sarebbe un bersaglio per il brute force offline.
+The detached process gets only the number and the deadline. It receives
+neither the password nor a hash of it: a plain hash in the arguments
+(visible with `ps`) would be a target for offline brute force.
 
-La scadenza è un istante sull'orologio reale, non "dormi 30 s": su macOS
-time.sleep non conta il tempo in cui il Mac è in stop, e con il coperchio
-chiuso i 30 s diventerebbero ore. Dormiamo a passi brevi e ricontrolliamo.
+The deadline is an instant on the wall clock, not "sleep 30 s": on macOS
+time.sleep does not count the time the Mac is asleep, and with the lid
+closed 30 s would turn into hours. We sleep in short steps and recheck.
 
-Limiti: chi legge gli appunti nei N secondi (qualsiasi app) vede la
-password; un gestore che ignora i marcatori la registra comunque; se il
-watchdog viene ucciso (logout, kill) nessuno cancella (al logout però gli
-appunti vengono comunque svuotati dal sistema). Tra il controllo del
-changeCount e lo svuotamento c'è una finestra minima: non esiste un'API
-atomica per farlo.
+Limitations: anyone reading the clipboard within the N seconds (any app)
+sees the password; a manager that ignores the markers records it anyway;
+if the watchdog is killed (logout, kill) nobody clears it (on logout,
+though, the system clears the clipboard anyway). Between the changeCount
+check and the clearing there is a tiny window: there is no atomic API
+for it.
 """
 
 import argparse
@@ -50,10 +50,10 @@ TRANSIENT_TYPE = "org.nspasteboard.TransientType"
 
 DEFAULT_SECONDS = 30
 _MAX_SECONDS = 600
-# Passo massimo di attesa del watchdog: dopo un risveglio dallo stop, la
-# cancellazione arriva entro questo tempo.
+# Maximum watchdog wait step: after waking from sleep, the clearing
+# happens within this time.
 _STEP_SECONDS = 2.0
-# Tempo concesso al watchdog per avviarsi e importare AppKit.
+# Time allowed for the watchdog to start and import AppKit.
 _READY_TIMEOUT = 5.0
 
 Spawn = Callable[..., Any]
@@ -61,20 +61,20 @@ Spawn = Callable[..., Any]
 
 def _general_pasteboard() -> Any:
     try:
-        import AppKit  # import pigro: solo macOS, solo quando serve davvero
+        import AppKit  # lazy import: macOS only, only when really needed
     except ImportError:
-        raise HsmError("pyobjc (AppKit) non disponibile: non posso usare gli appunti.") from None
+        raise HsmError("pyobjc (AppKit) not available: cannot use the clipboard.") from None
     return AppKit.NSPasteboard.generalPasteboard()
 
 
 def _spawn_detached(argv: list[str], **kwargs: Any) -> None:
-    # Non conserviamo il Popen: hsm è un comando breve, e quando termina il
-    # watchdog viene adottato da launchd, che ne raccoglie l'uscita.
+    # We don't keep the Popen: hsm is a short-lived command, and when it ends
+    # the watchdog is adopted by launchd, which reaps its exit.
     subprocess.Popen(argv, **kwargs)
 
 
 class Clipboard:
-    """Appunti di sistema con cancellazione automatica."""
+    """System clipboard with automatic clearing."""
 
     def __init__(
         self,
@@ -90,27 +90,27 @@ class Clipboard:
         self._ready_timeout = ready_timeout
 
     def copy_with_autoclear(self, secret: Secret, seconds: int = DEFAULT_SECONDS) -> None:
-        """Copia `secret` e programma la cancellazione dopo `seconds`.
+        """Copies `secret` and schedules the clearing after `seconds`.
 
-        Se qualcosa va storto dopo la scrittura, anche un Ctrl-C, gli
-        appunti vengono svuotati prima di propagare l'errore: la password
-        non deve mai restarci senza un watchdog.
+        If anything goes wrong after the write, even a Ctrl-C, the
+        clipboard is cleared before the error propagates: the password
+        must never stay there without a watchdog.
         """
         if not 1 <= seconds <= _MAX_SECONDS:
-            raise ValueError(f"seconds deve essere tra 1 e {_MAX_SECONDS}")
+            raise ValueError(f"seconds must be between 1 and {_MAX_SECONDS}")
         try:
-            # bytes(...), poi str, poi l'NSString di pyobjc: tre copie
-            # immutabili che non possiamo azzerare (limite noto).
+            # bytes(...), then str, then pyobjc's NSString: three immutable
+            # copies we cannot wipe (known limitation).
             text = bytes(secret.view()).decode("utf-8")
         except UnicodeDecodeError:
-            raise HsmError("La password non è UTF-8 valido: non posso copiarla.") from None
+            raise HsmError("The password is not valid UTF-8: cannot copy it.") from None
 
         pb = self._pasteboard if self._pasteboard is not None else _general_pasteboard()
         expected: int | None = None
         try:
-            # declareTypes svuota gli appunti e restituisce il nuovo
-            # changeCount: è quello della NOSTRA scrittura. Rileggerlo dopo
-            # rischierebbe di catturare la scrittura di un'altra app.
+            # declareTypes clears the clipboard and returns the new
+            # changeCount: the one of OUR write. Reading it again later
+            # could capture another app's write.
             expected = pb.declareTypes_owner_([STRING_TYPE, CONCEALED_TYPE, TRANSIENT_TYPE], None)
             written = (
                 pb.setString_forType_(text, STRING_TYPE)
@@ -119,21 +119,21 @@ class Clipboard:
             )
             del text
             if not written:
-                raise HsmError("Impossibile scrivere negli appunti.")
+                raise HsmError("Cannot write to the clipboard.")
             if pb.changeCount() != expected:
                 raise HsmError(
-                    "Un'altra app ha scritto negli appunti durante la copia: riprova."
+                    "Another app wrote to the clipboard during the copy: try again."
                 )
             self._start_watchdog(expected, self._clock() + seconds)
         except BaseException as exc:
             if expected is not None:
-                # Solo se gli appunti contengono ancora la nostra scrittura:
-                # una copia fatta dall'utente nel frattempo non si tocca.
+                # Only if the clipboard still holds our write: a copy the
+                # user made in the meantime is left alone.
                 clear_if_unchanged(pb, expected=expected)
             if isinstance(exc, HsmError) or not isinstance(exc, Exception):
-                raise  # HsmError, KeyboardInterrupt, SystemExit: così come sono
+                raise  # HsmError, KeyboardInterrupt, SystemExit: as they are
             raise HsmError(
-                f"Errore durante la copia negli appunti ({type(exc).__name__})."
+                f"Error while copying to the clipboard ({type(exc).__name__})."
             ) from None
 
     def _start_watchdog(self, expected: int, deadline: float) -> None:
@@ -141,8 +141,8 @@ class Clipboard:
         try:
             argv = [
                 sys.executable,
-                # -I: modalità isolata, ignora PYTHONPATH e la directory
-                # corrente, così nessun modulo "hsm" finto può sostituirsi.
+                # -I: isolated mode, ignores PYTHONPATH and the current
+                # directory, so no fake "hsm" module can take its place.
                 "-I",
                 "-m",
                 "hsm.clipboard",
@@ -156,8 +156,8 @@ class Clipboard:
             try:
                 self._spawn(
                     argv,
-                    # Nuova sessione: niente Ctrl-C dal terminale, e il
-                    # processo sopravvive alla sua chiusura.
+                    # New session: no Ctrl-C from the terminal, and the
+                    # process survives the terminal closing.
                     start_new_session=True,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -166,17 +166,17 @@ class Clipboard:
                 )
             except (OSError, subprocess.SubprocessError):
                 raise HsmError(
-                    "Non posso avviare la cancellazione automatica degli appunti: "
-                    "li ho svuotati per sicurezza."
+                    "Cannot start the automatic clipboard clearing: "
+                    "cleared it to be safe."
                 ) from None
-            # Chiudiamo la nostra copia del lato di scrittura: se il figlio
-            # muore senza scrivere, la lettura vede EOF subito, senza attese.
+            # Close our copy of the write end: if the child dies without
+            # writing, the read sees EOF right away, without waiting.
             os.close(write_fd)
             write_fd = -1
             if not _wait_ready(read_fd, self._ready_timeout):
                 raise HsmError(
-                    "La cancellazione automatica degli appunti non è partita: "
-                    "li ho svuotati per sicurezza."
+                    "The automatic clipboard clearing did not start: "
+                    "cleared it to be safe."
                 )
         finally:
             os.close(read_fd)
@@ -190,7 +190,7 @@ def _wait_ready(fd: int, timeout: float) -> bool:
 
 
 def clear_if_unchanged(pasteboard: Any, *, expected: int) -> bool:
-    """Svuota gli appunti se nessuno li ha modificati dopo di noi."""
+    """Clears the clipboard if nobody changed it after us."""
     if pasteboard.changeCount() != expected:
         return False
     pasteboard.clearContents()
@@ -204,21 +204,21 @@ def main(
     sleep: Callable[[float], object] = time.sleep,
     clock: Callable[[], float] = time.time,
 ) -> int:
-    """Entry point del watchdog: `python -I -m hsm.clipboard --expect N --deadline T`."""
+    """Watchdog entry point: `python -I -m hsm.clipboard --expect N --deadline T`."""
     parser = argparse.ArgumentParser(
         prog="python -m hsm.clipboard",
-        description="Svuota gli appunti a una scadenza, se non sono cambiati.",
+        description="Clears the clipboard at a deadline, if it has not changed.",
     )
-    parser.add_argument("--expect", type=int, required=True, help="changeCount atteso")
-    parser.add_argument("--deadline", type=float, required=True, help="scadenza (epoch, secondi)")
-    parser.add_argument("--ready-fd", type=int, help="fd su cui confermare l'avvio")
+    parser.add_argument("--expect", type=int, required=True, help="expected changeCount")
+    parser.add_argument("--deadline", type=float, required=True, help="deadline (epoch, seconds)")
+    parser.add_argument("--ready-fd", type=int, help="fd to confirm startup on")
     args = parser.parse_args(argv)
     now = clock()
     if not now - _MAX_SECONDS <= args.deadline <= now + _MAX_SECONDS:
-        parser.error("--deadline fuori intervallo")
+        parser.error("--deadline out of range")
 
-    # Prima tutto ciò che può fallire (import di AppKit), poi la conferma:
-    # il padre deve saperlo se non siamo in grado di cancellare.
+    # First everything that can fail (importing AppKit), then the
+    # confirmation: the parent must know if we are unable to clear.
     pb = pasteboard if pasteboard is not None else _general_pasteboard()
     if args.ready_fd is not None:
         os.write(args.ready_fd, b"1")

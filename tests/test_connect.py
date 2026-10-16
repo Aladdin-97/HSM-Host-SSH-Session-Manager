@@ -35,8 +35,8 @@ WEB01 = Host(
 
 @dataclass
 class FakeRunner:
-    """Finto ssh: registra la chiamata e, se c'è SSH_ASKPASS, fa le domande
-    all'helper vero (askpass.main) come farebbe ssh, nell'ordine dato."""
+    """Fake ssh: records the call and, if SSH_ASKPASS is set, asks the real
+    helper (askpass.main) the questions as ssh would, in the given order."""
 
     returncode: int = 0
     raises: BaseException | None = None
@@ -51,7 +51,7 @@ class FakeRunner:
             raise self.raises
         env = kwargs.get("env") or {}
         if "on_spawn" in kwargs:
-            # L'helper gira qui, in-process: il suo "padre" è il nostro padre.
+            # The helper runs here, in-process: its "parent" is our parent.
             kwargs["on_spawn"](os.getppid())
         if "SSH_ASKPASS" in env:
             for prompt in self.prompts:
@@ -112,8 +112,8 @@ def test_minimal_argv(tmp_path: Path) -> None:
 
 
 def test_destination_always_after_double_dash(tmp_path: Path) -> None:
-    # Difesa in profondità: anche se la validazione cambiasse, un hostname
-    # che inizia con "-" non verrebbe mai letto come opzione.
+    # Defense in depth: even if validation changed, a hostname starting
+    # with "-" would never be read as an option.
     argv = build_argv(WEB01, inventory(tmp_path, BASTION, WEB01))
     assert argv[-2:] == ["--", "10.0.0.1"]
 
@@ -136,25 +136,25 @@ def test_jump_chain_is_resolved_outermost_first(tmp_path: Path) -> None:
     inner = Host(alias="inner", hostname="inner.lan", jump_host="outer")
     h = Host(alias="x", hostname="x", jump_host="inner")
     argv = build_argv(h, inventory(tmp_path, outer, inner, h))
-    # -J a,b: prima a, poi b, poi la destinazione.
+    # -J a,b: first a, then b, then the destination.
     assert argv[argv.index("-J") + 1] == "outer.example.com:22,inner.lan:22"
 
 
 def test_jump_cycle_is_an_error(tmp_path: Path) -> None:
     a = Host(alias="a", hostname="a", jump_host="b")
     b = Host(alias="b", hostname="b", jump_host="a")
-    with pytest.raises(HsmError, match="ciclo"):
+    with pytest.raises(HsmError, match="cycle"):
         build_argv(a, inventory(tmp_path, a, b))
 
 
 def test_jump_alias_with_ipv6_zone_is_unsupported(tmp_path: Path) -> None:
     z = Host(alias="z", hostname="fe80::1%en0")
     h = Host(alias="x", hostname="x", jump_host="z")
-    with pytest.raises(HsmError, match="zona"):
+    with pytest.raises(HsmError, match="zone"):
         build_argv(h, inventory(tmp_path, z, h))
 
 
-# --- connect senza password (il caso normale) --------------------------------
+# --- connect without password (the normal case) -----------------------------
 
 
 def test_key_auth_runs_plain_ssh(env: Env) -> None:
@@ -177,7 +177,7 @@ def test_missing_ssh_is_clean_error(env: Env) -> None:
         env.connector().connect(BASTION, inventory(env.tmp_path, BASTION))
 
 
-# --- connect con password via SSH_ASKPASS --------------------------------------
+# --- connect with password via SSH_ASKPASS ------------------------------------
 
 BASTION_PROMPT = "jump@bastion.example.com's password: "
 HOSTKEY_PROMPT = "The authenticity of host ... Are you sure you want to continue connecting (yes/no/[fingerprint])? "
@@ -211,7 +211,7 @@ def test_default_user_is_the_local_one(env: Env) -> None:
 
 def test_rejected_password_is_reported(env: Env) -> None:
     prompt = "jump@bastion.example.com's password: "
-    env.runner.prompts = [prompt, prompt]  # ssh la richiede: era sbagliata
+    env.runner.prompts = [prompt, prompt]  # ssh asks again: it was wrong
     env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
     assert env.runner.answers[1] == (1, b"")
     assert any("hsm pw set bastion" in w for w in env.warnings)
@@ -224,19 +224,19 @@ def test_password_with_jump_host_warns(env: Env) -> None:
 
 @pytest.mark.parametrize("bad", [b"a\nb", b"a\rb", b"a\x00b"])
 def test_password_with_line_break_is_rejected(env: Env, bad: bytes) -> None:
-    with pytest.raises(HsmError, match="a capo"):
+    with pytest.raises(HsmError, match="newline"):
         env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(bad))
     assert env.runner.calls == []
 
 
 def test_oversized_password_is_rejected(env: Env) -> None:
-    with pytest.raises(HsmError, match="lunga"):
+    with pytest.raises(HsmError, match="too long"):
         env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"x" * 5000))
 
 
 def test_missing_helper_is_clean_error(env: Env, tmp_path: Path) -> None:
     connector = Connector(runner=env.runner, warn=env.warnings.append, askpass_helper=lambda: tmp_path / "nope")
-    with pytest.raises(HsmError, match="reinstalla"):
+    with pytest.raises(HsmError, match="reinstall"):
         connector.connect(BASTION, inventory(tmp_path, BASTION), password=Secret(b"pw"))
     assert env.runner.calls == []
 
@@ -247,7 +247,7 @@ def test_key_auth_does_not_set_askpass(env: Env) -> None:
 
 
 def test_negative_returncode_becomes_shell_style(env: Env) -> None:
-    env.runner.returncode = -9  # ucciso da SIGKILL
+    env.runner.returncode = -9  # killed by SIGKILL
     assert env.connector().connect(BASTION, inventory(env.tmp_path, BASTION)) == 128 + 9
 
 
@@ -266,8 +266,8 @@ def test_default_runner_ignores_sigint_in_parent_only(monkeypatch: pytest.Monkey
 
     class FakePopen:
         def __init__(self, argv: list[str], **kwargs: object) -> None:
-            # Al momento del fork il padre NON deve ancora ignorare SIGINT:
-            # SIG_IGN verrebbe ereditato da ssh.
+            # At fork time the parent must NOT be ignoring SIGINT yet:
+            # SIG_IGN would be inherited by ssh.
             seen.append(signal.getsignal(signal.SIGINT))
 
         def wait(self) -> int:
@@ -292,7 +292,7 @@ def test_jump_alias_lookup_is_case_insensitive(tmp_path: Path) -> None:
 
 
 def test_unknown_bare_jump_label_warns(tmp_path: Path) -> None:
-    h = Host(alias="x", hostname="x", jump_host="bastoin")  # refuso
+    h = Host(alias="x", hostname="x", jump_host="bastoin")  # typo
     warnings: list[str] = []
     build_argv(h, inventory(tmp_path, h), warn=warnings.append)
     assert any("bastoin" in w for w in warnings)
@@ -307,7 +307,7 @@ def test_literal_ip_or_fqdn_jump_does_not_warn(tmp_path: Path, jump: str) -> Non
 
 
 def test_effective_names_from_ssh_config_are_recognized(env: Env) -> None:
-    # Se ~/.ssh/config cambia HostName/User, il prompt usa quei valori.
+    # If ~/.ssh/config changes HostName/User, the prompt uses those values.
     connector = Connector(
         runner=env.runner, warn=env.warnings.append, askpass_helper=env.connector()._askpass_helper,
         local_user=lambda: "localme", resolve=lambda argv: [("realuser", "real.example.com")],
