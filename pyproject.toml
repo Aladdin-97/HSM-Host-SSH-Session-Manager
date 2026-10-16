@@ -9,6 +9,10 @@ dependencies = [
     # Controllo Touch ID (LAContext): non esiste un comando di sistema
     # equivalente, e scriverne un binding ctypes a mano sarebbe più fragile.
     "pyobjc-framework-localauthentication>=11 ; sys_platform == 'darwin'",
+    # NSPasteboard per gli appunti: a differenza di pbcopy permette di marcare
+    # la password come "da non salvare in cronologia". Già richiesto da
+    # LocalAuthentication: dichiararlo non aggiunge pacchetti.
+    "pyobjc-framework-cocoa>=11 ; sys_platform == 'darwin'",
     # Legge/scrive hosts.toml preservando i commenti scritti a mano.
     "tomlkit>=0.13",
 ]
