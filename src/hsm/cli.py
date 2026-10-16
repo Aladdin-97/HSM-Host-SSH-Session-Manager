@@ -30,6 +30,8 @@ import getpass
 import os
 import re
 import resource
+import shutil
+import stat
 import sys
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -37,13 +39,14 @@ from pathlib import Path
 
 from hsm import vault
 from hsm.clipboard import DEFAULT_SECONDS, Clipboard
-from hsm.connect import Connector
-from hsm.errors import HsmError, make_excepthook
+from hsm.connect import SSH, Connector, find_sshpass
+from hsm.errors import HsmError, InsecurePermissionsError, make_excepthook
 from hsm.fsutil import check_private, ensure_private_dir, locked
 from hsm.inventory import DEFAULT_PORT, Host, Inventory, is_valid_alias
 from hsm.picker import Picker, format_line
 from hsm.secret import Secret
-from hsm.sshconfig import apply, render
+from hsm.keychain import Keychain, KeychainError
+from hsm.sshconfig import BEGIN, apply, render
 from hsm.state import State
 from hsm.unlock import Unlocker
 from hsm.vault import VaultEntry
@@ -97,8 +100,12 @@ class App:
         ask_secret: Callable[[str], str] = getpass.getpass,
         out: Callable[[str], None] = print,
         warn: Callable[[str], None] = _warn_stderr,
+        keychain: Keychain | None = None,
+        which: Callable[[str], str | None] = shutil.which,
     ) -> None:
         self.paths = paths
+        self._keychain = keychain if keychain is not None else Keychain()
+        self._which = which
         self._unlocker_factory = unlocker_factory
         self._clipboard = clipboard if clipboard is not None else Clipboard()
         self._connector = connector or Connector(
@@ -142,6 +149,8 @@ class App:
                 return self.vault_rekey()
             case "sync":
                 return self.sync(dry_run=args.dry_run)
+            case "paths":
+                return self.show_paths()
         raise HsmError(f"Comando sconosciuto: {args.command}")  # pragma: no cover - argparse lo impedisce
 
     # --- inventario ---------------------------------------------------------
@@ -479,6 +488,73 @@ class App:
             self._out(f"Aggiornato {self.paths.ssh_config}{backup}.")
         return 0
 
+    # --- diagnostica ------------------------------------------------------------
+
+    def show_paths(self) -> int:
+        """Tutti i file e i programmi che hsm usa, con il loro stato.
+
+        Solo lettura: non crea nulla, non apre il vault, non legge segreti.
+        Gira anche con permessi sbagliati, proprio per mostrarli.
+        """
+        p = self.paths
+        rows = [
+            ("COSA", "PERCORSO", "STATO"),
+            ("Configurazione", str(p.config_dir), _status(p.config_dir)),
+            ("Inventario", str(p.hosts), _status(p.hosts)),
+            ("Vault", str(p.vault), _status(p.vault)),
+            ("Stato", str(p.state), _status(p.state)),
+            ("Lock", str(p.lock), _status(p.lock)),
+            ("SSH config", str(p.ssh_config), self._ssh_config_status()),
+            self._backups_row(),
+            self._keychain_row(),
+            ("ssh", SSH, "ok" if os.access(SSH, os.X_OK) else "non trovato"),
+            self._program_row("sshpass", find_sshpass(), "non installato: la password andrà incollata"),
+            self._program_row("fzf", self._which("fzf"), "non installato: lista numerata"),
+            ("Python", sys.executable, "esegue hsm e il watchdog degli appunti"),
+        ]
+        widths = [max(len(r[i]) for r in rows) for i in range(2)]
+        for label, path, status in rows:
+            self._out(f"{label.ljust(widths[0])}  {path.ljust(widths[1])}  {status}".rstrip())
+        return 0
+
+    def _ssh_config_status(self) -> str:
+        path = self.paths.ssh_config
+        status = _status(path)
+        if not os.path.isfile(path) or os.path.islink(path):
+            return status
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"{status}, illeggibile ({exc.strerror})"
+        block = "blocco hsm presente" if BEGIN in text else "nessun blocco hsm"
+        return f"{status}, {block}"
+
+    def _backups_row(self) -> tuple[str, str, str]:
+        path = self.paths.ssh_config
+        pattern = f"{path.name}.hsm-backup-*"
+        backups = sorted(path.parent.glob(pattern)) if path.parent.is_dir() else []
+        status = f"{len(backups)} file, ultimo {backups[-1].name}" if backups else "nessuno"
+        return ("Backup SSH config", str(path.parent / pattern), status)
+
+    def _keychain_row(self) -> tuple[str, str, str]:
+        label = "Keychain"
+        if not os.path.lexists(self.paths.vault):
+            return (label, "login keychain, servizio hsm", "nessun vault, nessun item")
+        try:
+            kid = vault.key_id(vault.read_header(self.paths.vault))
+        except HsmError as exc:
+            return (label, "login keychain, servizio hsm", f"vault illeggibile: {exc}")
+        where = f"login keychain, servizio hsm, account {kid}"
+        try:
+            present = self._keychain.has_key(kid)
+        except KeychainError as exc:
+            return (label, where, f"non verificabile: {exc}")
+        return (label, where, "presente (sblocco con Touch ID)" if present else "assente (serve la master password)")
+
+    @staticmethod
+    def _program_row(name: str, found: str | None, missing: str) -> tuple[str, str, str]:
+        return (name, found or "-", "ok" if found else missing)
+
     # --- supporto -------------------------------------------------------------
 
     def _unlocker(self) -> Unlocker:
@@ -602,6 +678,17 @@ def _host_flags(args: argparse.Namespace) -> dict[str, object]:
     return {k: v for k, v in mapping.items() if v is not None}
 
 
+def _status(path: Path) -> str:
+    """Esiste? È privato? In una riga, senza sollevare eccezioni previste."""
+    if not os.path.lexists(path):
+        return "non esiste"
+    try:
+        check_private(path)
+    except InsecurePermissionsError as exc:
+        return f"PROBLEMA: {exc}"
+    return f"ok ({stat.S_IMODE(os.lstat(path).st_mode):03o})"
+
+
 def _wipe(entries: dict[str, VaultEntry]) -> None:
     for entry in entries.values():
         entry.password.wipe()
@@ -658,6 +745,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = sub.add_parser("sync", help="rigenera il blocco hsm in ~/.ssh/config")
     sync.add_argument("--dry-run", action="store_true")
+
+    sub.add_parser("paths", help="mostra tutti i file e i programmi usati, con il loro stato")
     return parser
 
 
@@ -672,7 +761,10 @@ def main(argv: Sequence[str] | None = None, *, app: App | None = None) -> int:
     sys.excepthook = make_excepthook(debug=args.debug)
     _harden()
     app = app if app is not None else App(Paths.default())
-    app.preflight()
+    # `paths` è la diagnostica: deve funzionare anche con permessi sbagliati,
+    # per mostrarli. Non scrive e non legge segreti, quindi può farlo.
+    if args.command != "paths":
+        app.preflight()
     return app.run(args)
 
 

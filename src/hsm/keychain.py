@@ -135,6 +135,17 @@ class Keychain:
         # stdout (bytes immutabili) resta in memoria fino al GC: limite noto.
         return Secret(bytearray.fromhex(out.decode("ascii")))
 
+    def has_key(self, key_id: str) -> bool:
+        """True se l'item esiste. Non legge il segreto (niente -w), quindi
+        nessun prompt e nessun dato sensibile in uscita: serve a `hsm paths`."""
+        _check_key_id(key_id)
+        result = self._call(["find-generic-password", "-s", self._service, "-a", key_id])
+        if result.returncode == _EXIT_NOT_FOUND:
+            return False
+        if result.returncode != 0:
+            raise KeychainError(f"Lettura dal Keychain fallita: {_reason(result)}")
+        return True
+
     def delete_key(self, key_id: str) -> bool:
         """Cancella l'item. True se esisteva, False se non c'era."""
         _check_key_id(key_id)

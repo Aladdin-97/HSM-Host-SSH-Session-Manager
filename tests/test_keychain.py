@@ -239,3 +239,22 @@ def test_any_subprocess_failure_is_keychain_error(exc: BaseException) -> None:
     # sfuggire da qui, altrimenti un Keychain rotto bloccherebbe l'unlock.
     with pytest.raises(KeychainError):
         _kc(FakeSecurity(raises=exc)).load_key(KID)
+
+
+# --- has_key (per hsm paths) ---------------------------------------------------
+
+
+def test_has_key_queries_attributes_only() -> None:
+    fake = FakeSecurity(stdout=b'keychain: "login.keychain-db"\n')
+    assert _kc(fake).has_key(KID) is True
+    # Senza -w: security restituisce solo gli attributi, mai il segreto.
+    assert fake.calls[0][0] == [SECURITY, "find-generic-password", "-s", "hsm", "-a", KID]
+
+
+def test_has_key_missing() -> None:
+    assert _kc(FakeSecurity(returncode=44)).has_key(KID) is False
+
+
+def test_has_key_error() -> None:
+    with pytest.raises(KeychainError):
+        _kc(FakeSecurity(returncode=1, stderr=b"boom")).has_key(KID)

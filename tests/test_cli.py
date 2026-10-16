@@ -34,6 +34,9 @@ class FakeKeychain:
     def delete_key(self, key_id: str) -> bool:
         return self.items.pop(key_id, None) is not None
 
+    def has_key(self, key_id: str) -> bool:
+        return key_id in self.items
+
 
 @dataclass
 class FakeConnector:
@@ -112,6 +115,8 @@ class Env:
             ask_secret=self._secret,
             out=self.out.append,
             warn=self.warnings.append,
+            keychain=self.keychain,  # type: ignore[arg-type]
+            which=lambda name: {"fzf": "/opt/homebrew/bin/fzf"}.get(name),
         )
 
     def run(self, *argv: str) -> int:
@@ -817,3 +822,68 @@ def test_add_password_dry_run_asks_nothing_and_writes_nothing(env: Env) -> None:
     assert not env.paths.hosts.exists() and not env.paths.vault.exists()
     assert '+auth = "password"' in env.text()
     assert "vault" in env.text()
+
+
+# --- hsm paths ---------------------------------------------------------------------
+
+
+def _paths_rows(env: Env) -> dict[str, str]:
+    env.out.clear()
+    assert env.run("paths") == 0
+    # Righe "ETICHETTA  PERCORSO  STATO" (a parte l'intestazione).
+    return {line.split("  ")[0].strip(): line for line in env.out[1:]}
+
+
+def test_paths_on_fresh_install_creates_nothing(env: Env) -> None:
+    rows = _paths_rows(env)
+    for label in ("Configurazione", "Inventario", "Vault", "Stato", "Lock", "SSH config"):
+        assert "non esiste" in rows[label], label
+    assert str(env.paths.vault) in rows["Vault"]
+    assert not env.paths.config_dir.exists()
+
+
+def test_paths_reports_ok_files_and_ssh_block(env: Env) -> None:
+    _add_web01(env)
+    atomic_write(env.paths.ssh_config, b"Host old\n")
+    env.run("sync")
+    rows = _paths_rows(env)
+    assert "ok" in rows["Inventario"] and "600" in rows["Inventario"]
+    assert "ok" in rows["Configurazione"] and "700" in rows["Configurazione"]
+    assert "blocco hsm presente" in rows["SSH config"]
+    assert "1 file" in rows["Backup SSH config"]
+
+
+def test_paths_shows_permission_problems_instead_of_refusing(env: Env) -> None:
+    _add_web01(env)
+    env.paths.hosts.chmod(0o644)
+    # Gli altri comandi si rifiutano di partire; paths deve mostrare il problema.
+    assert main(["paths"], app=env.app()) == 0
+    rows = {line.split("  ")[0].strip(): line for line in env.out if "  " in line}
+    assert "chmod 600" in rows["Inventario"]
+
+
+def test_paths_keychain_row(env: Env) -> None:
+    rows = _paths_rows(env)
+    assert "nessun vault" in rows["Keychain"]
+    _add_web01(env)
+    _vault_with_password(env, "web01", "host-pw")
+    rows = _paths_rows(env)
+    kid = vault.key_id(vault.read_header(env.paths.vault))
+    assert kid in rows["Keychain"] and "presente" in rows["Keychain"]
+    env.keychain.items.clear()
+    assert "assente" in _paths_rows(env)["Keychain"]
+
+
+def test_paths_lists_programs(env: Env) -> None:
+    rows = _paths_rows(env)
+    assert "/usr/bin/ssh" in rows["ssh"]
+    assert "/opt/homebrew/bin/fzf" in rows["fzf"]
+    assert sys.executable in rows["Python"]
+
+
+def test_paths_never_unlocks(env: Env) -> None:
+    _add_web01(env)
+    _vault_with_password(env, "web01", "host-pw")
+    before = env.unlocks
+    _paths_rows(env)
+    assert env.unlocks == before
