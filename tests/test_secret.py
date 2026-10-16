@@ -88,3 +88,16 @@ def test_len() -> None:
 def test_not_hashable() -> None:
     with pytest.raises(TypeError):
         hash(Secret(b"abc"))
+
+
+def test_view_of_temporary_secret_keeps_its_content() -> None:
+    # Regressione: __del__ azzerava il buffer quando il Secret temporaneo
+    # veniva distrutto, mentre la sua view era ancora in uso. Risultato:
+    # zeri al posto della chiave, senza nessun errore.
+    def make() -> Secret:
+        return Secret(bytearray(b"abc"))
+
+    # Fuori dall'assert: la riscrittura degli assert di pytest tiene vivi i
+    # valori intermedi e nasconderebbe il bug.
+    content = bytes(make().view())
+    assert content == b"abc"

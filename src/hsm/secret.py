@@ -82,10 +82,7 @@ class Secret:
     ) -> None:
         self.wipe()
 
-    def __del__(self) -> None:
-        # Ultima difesa: se nessuno ha chiamato wipe(), lo facciamo alla
-        # distruzione. getattr perché __init__ potrebbe non essere arrivato
-        # ad assegnare _buf.
-        buf = getattr(self, "_buf", None)
-        if buf is not None:
-            buf[:] = bytes(len(buf))
+    # Volutamente nessun __del__ che azzeri il buffer: una view() può
+    # sopravvivere al Secret da cui è nata (es. `bytes(derive().view())`),
+    # e azzerarla alla distruzione trasformerebbe in silenzio una chiave in
+    # 32 zeri. Si azzera solo esplicitamente, con wipe() o con `with`.
