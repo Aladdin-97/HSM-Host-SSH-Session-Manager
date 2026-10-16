@@ -167,21 +167,63 @@ class App:
     def edit(self, args: argparse.Namespace) -> int:
         alias = args.alias
         flags = _host_flags(args)
-        if flags:
+        new_alias: str | None = args.new_alias
+        if flags or new_alias:
             # Con i flag la modifica si applica alla versione più recente
             # dell'host, letta sotto lock.
             def change(inv: Inventory) -> None:
-                inv.update(dataclasses.replace(inv.get(alias), **flags))
+                target = alias
+                if new_alias and new_alias != alias:
+                    inv.rename(alias, new_alias)
+                    target = new_alias
+                if flags:
+                    inv.update(dataclasses.replace(inv.get(target), **flags))
         else:
-            host = self._ask_host(alias, Inventory.load(self.paths.hosts).get(alias))
+            host = self._ask_host(alias, Inventory.load(self.paths.hosts).get(alias), ask_alias=True)
+            new_alias = host.alias
 
             def change(inv: Inventory) -> None:
+                if host.alias != alias:
+                    inv.rename(alias, host.alias)
                 inv.update(host)
 
-        self._change_inventory(change, dry_run=args.dry_run)
-        if not args.dry_run:
-            self._out(f"Aggiornato {alias}.")
+        if args.dry_run or new_alias is None or new_alias == alias:
+            self._change_inventory(change, dry_run=args.dry_run)
+            if not args.dry_run:
+                self._out(f"Aggiornato {alias}.")
+            return 0
+        self._rename(alias, new_alias, change)
         return 0
+
+    def _rename(self, old: str, new: str, change: Callable[[Inventory], None]) -> None:
+        """Rinomina sotto lock: inventario, password nel vault, ultimo uso."""
+        ensure_private_dir(self.paths.config_dir)
+        with locked(self.paths.lock):
+            inv = Inventory.load(self.paths.hosts)
+            uses_password = inv.get(old).auth == "password"
+            # Prima l'inventario in memoria: se il nuovo alias non è valido o
+            # è già usato, ci fermiamo qui senza aver toccato il vault.
+            change(inv)
+            if uses_password and os.path.lexists(self.paths.vault):
+                with self._unlocker().get_vault_key() as key:
+                    entries = vault.load(self.paths.vault, key)
+                    try:
+                        entry = entries.pop(old, None)
+                        if entry is not None:
+                            entries[new] = entry
+                            vault.save(self.paths.vault, key, entries)
+                    finally:
+                        _wipe(entries)
+            try:
+                inv.save()
+            except (OSError, HsmError) as exc:
+                raise HsmError(
+                    f"La password nel vault ora è sotto {new}, ma non ho potuto aggiornare "
+                    f"{self.paths.hosts} ({exc}): rinomina l'host a mano in {new}."
+                ) from None
+        self._update_state(lambda s: s.rename(old, new))
+        self._out(f"Rinominato {old} in {new}.")
+        self._out("Rilancia hsm sync per aggiornare ~/.ssh/config, che ha ancora il vecchio nome.")
 
     def ls(self, tag: str | None, sort: str) -> int:
         inv = Inventory.load(self.paths.hosts)
@@ -474,7 +516,7 @@ class App:
             return False
         return answer.strip().casefold() in ("s", "si", "sì", "y", "yes")
 
-    def _ask_host(self, alias: str, current: Host | None) -> Host:
+    def _ask_host(self, alias: str, current: Host | None, *, ask_alias: bool = False) -> Host:
         """Prompt campo per campo. Invio = valore mostrato, "-" = cancella."""
 
         def ask(label: str, value: str | None) -> str | None:
@@ -484,6 +526,11 @@ class App:
                 return value or None
             return None if answer == "-" else answer
 
+        if ask_alias:
+            new_alias = ask("Alias", alias)
+            if new_alias is None:
+                raise HsmError("Serve un alias.")
+            alias = new_alias
         hostname = ask("Hostname", current.hostname if current else None)
         if hostname is None:
             raise HsmError("Serve un hostname.")
@@ -546,7 +593,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--dry-run", action="store_true", help="mostra le modifiche senza scriverle")
 
     host_fields(sub.add_parser("add", help="aggiunge un host"))
-    host_fields(sub.add_parser("edit", help="modifica un host"))
+    edit = sub.add_parser("edit", help="modifica un host")
+    host_fields(edit)
+    # dest diverso dal positional `alias`: è il NUOVO nome.
+    edit.add_argument("--alias", dest="new_alias", metavar="NUOVO", help="rinomina l'host")
 
     ls = sub.add_parser("ls", help="elenca gli host")
     ls.add_argument("--tag")

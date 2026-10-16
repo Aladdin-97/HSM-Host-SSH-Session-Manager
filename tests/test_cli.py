@@ -271,8 +271,8 @@ def test_edit_with_flags_keeps_other_fields(env: Env) -> None:
 
 def test_edit_interactive_keeps_defaults_and_clears_with_dash(env: Env) -> None:
     _add_web01(env, "--note", "vecchia nota")
-    # hostname, user, port, tag, jump, identity, note
-    env.answers = ["", "-", "", "", "", "", "-"]
+    # alias, hostname, user, port, tag, jump, identity, note
+    env.answers = ["", "", "-", "", "", "", "", "-"]
     assert env.run("edit", "web01") == 0
     host = env.inventory().get("web01")
     assert (host.hostname, host.user, host.note) == ("10.0.0.1", None, None)
@@ -691,3 +691,52 @@ def test_add_validates_alias_before_asking_anything(env: Env) -> None:
     with pytest.raises(HsmError, match="alias"):
         env.run("add", "bad alias")
     assert env.answers == []  # nessuna domanda consumata (e nessun EOF)
+
+
+# --- rinomina ---------------------------------------------------------------------
+
+
+def test_edit_alias_renames_and_updates_dependents(env: Env) -> None:
+    env.run("add", "bastion", "--hostname", "b.example.com")
+    _add_web01(env, "--jump", "bastion")
+    env.out.clear()
+    assert env.run("edit", "bastion", "--alias", "gw") == 0
+    inv = env.inventory()
+    assert inv.get("gw").hostname == "b.example.com"
+    assert inv.get("web01").jump_host == "gw"
+    assert "hsm sync" in env.text()  # il vecchio blocco in ssh_config va rigenerato
+
+
+def test_edit_alias_together_with_other_flags(env: Env) -> None:
+    _add_web01(env)
+    env.run("edit", "web01", "--alias", "web02", "--port", "2200")
+    assert env.inventory().get("web02").port == 2200
+
+
+def test_edit_interactive_asks_alias_first(env: Env) -> None:
+    _add_web01(env)
+    env.answers = ["web02", "", "", "", "", "", "", ""]
+    env.run("edit", "web01")
+    assert env.inventory().get("web02").hostname == "10.0.0.1"
+
+
+def test_edit_alias_moves_vault_entry_and_last_use(env: Env) -> None:
+    _add_web01(env)
+    _vault_with_password(env, "web01", "host-pw")
+    env.secrets = [MASTER]
+    env.run("connect", "web01")  # registra l'ultimo uso
+    env.secrets = [MASTER]
+    env.run("edit", "web01", "--alias", "web02")
+    assert State.load(env.paths.state).last_used("web02") is not None
+    env.secrets = [MASTER]
+    env.connector.calls.clear()
+    env.run("connect", "web02")
+    assert env.connector.calls == [("web02", b"host-pw")]
+
+
+def test_edit_alias_dry_run_changes_nothing(env: Env) -> None:
+    _add_web01(env)
+    before = env.paths.hosts.read_text()
+    env.run("edit", "web01", "--alias", "web02", "--dry-run")
+    assert env.paths.hosts.read_text() == before
+    assert "+[hosts.web02]" in env.text()

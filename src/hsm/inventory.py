@@ -37,6 +37,7 @@ Due scelte che contano:
   tomlkit modifica il documento sul posto e conserva tutto il resto.
 """
 
+import dataclasses
 import ipaddress
 import re
 from collections.abc import Mapping
@@ -295,6 +296,34 @@ class Inventory:
             elif key not in table or table[key] != value:
                 table[key] = value
         self._hosts[host.alias] = host
+
+    def rename(self, old: str, new: str) -> list[str]:
+        """Cambia l'alias di un host. Restituisce gli host il cui jump_host è stato aggiornato.
+
+        Gli host che usavano `old` come jump_host vengono aggiornati: lasciarli
+        così li farebbe risolvere via DNS, magari verso un'altra macchina.
+        Il confronto ignora le maiuscole, come fa la risoluzione dei jump.
+        Tutti i controlli avvengono prima di modificare qualsiasi cosa.
+        """
+        host = self.get(old)
+        renamed = dataclasses.replace(host, alias=new)  # rivalida il nuovo alias
+        _check_conflicts(renamed, self._hosts, replacing=old)
+        dependents = sorted(
+            h.alias
+            for h in self._hosts.values()
+            if h.alias != old and h.jump_host is not None and h.jump_host.casefold() == old.casefold()
+        )
+        # La tabella viene spostata, non ricreata: i commenti al suo interno
+        # restano. Nel file finisce in fondo alla sezione [hosts].
+        section = self._doc["hosts"]
+        table = section[old]  # type: ignore[index]
+        del section[old]  # type: ignore[union-attr]
+        section[new] = table  # type: ignore[index]
+        del self._hosts[old]
+        self._hosts[new] = renamed
+        for alias in dependents:
+            self.update(dataclasses.replace(self._hosts[alias], jump_host=new))
+        return dependents
 
     def remove(self, alias: str, *, force: bool = False) -> Host:
         """Toglie un host. Se altri lo usano come jump_host serve `force`.

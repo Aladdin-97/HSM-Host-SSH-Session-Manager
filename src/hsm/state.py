@@ -106,6 +106,13 @@ class State:
     def forget(self, alias: str) -> None:
         self._last_used.pop(alias, None)
 
+    def rename(self, old: str, new: str) -> None:
+        """Sposta l'ultimo uso di `old` sul nuovo alias (se c'era)."""
+        if not is_valid_alias(new):
+            raise ValueError(f"alias non valido: {new!r}")
+        if old in self._last_used:
+            self._last_used[new] = self._last_used.pop(old)
+
     def prune(self, known: Iterable[str]) -> None:
         """Dimentica gli alias che non sono più nell'inventario."""
         keep = set(known)

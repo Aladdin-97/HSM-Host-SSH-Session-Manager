@@ -204,3 +204,14 @@ def test_load_or_empty_still_refuses_permissive_file(path: Path) -> None:
     path.chmod(0o644)
     with pytest.raises(InsecurePermissionsError):
         State.load_or_empty(path, lambda _: None)
+
+
+def test_rename_moves_last_use(path: Path) -> None:
+    s = State.load(path)
+    s.touch("web01", T0)
+    s.rename("web01", "web02")
+    assert s.last_used("web01") is None
+    assert s.last_used("web02") == T0
+    s.rename("never-seen", "x")  # nessun errore
+    with pytest.raises(ValueError):
+        s.rename("web02", "bad alias")

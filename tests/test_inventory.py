@@ -476,3 +476,66 @@ def test_auth_password_roundtrip(path: Path) -> None:
 def test_auth_rejects_unknown_values(bad: str) -> None:
     with pytest.raises(InvalidHostError, match="auth"):
         web01(auth=bad)
+
+
+# --- rinomina ---------------------------------------------------------------------
+
+
+def test_rename_moves_host_and_keeps_fields(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(web01())
+    inv.rename("web01", "web02")
+    with pytest.raises(HostNotFound):
+        inv.get("web01")
+    assert inv.get("web02") == web01(alias="web02")
+    inv.save()
+    assert Inventory.load(path).get("web02") == web01(alias="web02")
+
+
+def test_rename_updates_jump_host_of_other_hosts(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(Host(alias="bastion", hostname="b"))
+    inv.add(web01())  # jump_host = "bastion"
+    inv.add(Host(alias="db", hostname="db", jump_host="Bastion"))  # ssh non distingue maiuscole
+    assert inv.rename("bastion", "gw") == ["db", "web01"]
+    assert inv.get("web01").jump_host == "gw"
+    assert inv.get("db").jump_host == "gw"
+
+
+def test_rename_conflicts(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(web01())
+    inv.add(Host(alias="db", hostname="db.example.com"))
+    with pytest.raises(HostExistsError):
+        inv.rename("web01", "DB")
+    with pytest.raises(InventoryError, match="db.example.com"):
+        inv.rename("web01", "db.example.com")  # hostname di un altro host
+    with pytest.raises(InvalidHostError, match="alias"):
+        inv.rename("web01", "bad alias")
+    with pytest.raises(HostNotFound):
+        inv.rename("nope", "x")
+    assert inv.get("web01") == web01()  # nulla è cambiato
+
+
+def test_rename_case_only(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(web01())
+    inv.rename("web01", "Web01")
+    assert inv.get("Web01").hostname == "10.0.0.1"
+
+
+def test_rename_preserves_comments(path: Path) -> None:
+    _write(
+        path,
+        """# I miei server
+[hosts.web01]
+hostname = "10.0.0.1"  # IP interno
+port = 2222
+""",
+    )
+    inv = Inventory.load(path)
+    inv.rename("web01", "web02")
+    inv.save()
+    text = path.read_text()
+    assert "# I miei server" in text and "# IP interno" in text
+    assert "[hosts.web02]" in text and "web01" not in text
