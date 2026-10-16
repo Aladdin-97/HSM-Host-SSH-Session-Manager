@@ -161,6 +161,12 @@ class Keychain:
                 # stato scritto oppure no.
                 msg += " Lo stato dell'item è incerto: verrà riscritto al prossimo unlock."
             raise KeychainError(msg) from None
+        except (OSError, subprocess.SubprocessError) as exc:
+            # Binario non eseguibile, fork fallita, ecc. Tutto diventa
+            # KeychainError, così unlock può sempre ripiegare sulla password.
+            raise KeychainError(
+                f"Impossibile eseguire {self._security} ({type(exc).__name__})."
+            ) from None
 
 
 def _check_key_id(key_id: str) -> None:

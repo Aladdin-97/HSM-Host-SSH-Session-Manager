@@ -48,6 +48,7 @@ class FakeContext:
     threaded: bool = False  # True: callback su un altro thread, come nel sistema
     calls: list[tuple[int, str]] = field(default_factory=list)
     invalidated: bool = False
+    threads: list[threading.Thread] = field(default_factory=list)
 
     def canEvaluatePolicy_error_(self, policy: int, error: None) -> tuple[bool, FakeNSError | None]:  # noqa: N802
         if self.raise_on == "can":
@@ -65,7 +66,9 @@ class FakeContext:
             raise objc.error("NSInternalInconsistencyException")
         if self.reply_error is not None:
             if self.threaded:
-                threading.Thread(target=reply, args=(self.success, self.reply_error)).start()
+                t = threading.Thread(target=reply, args=(self.success, self.reply_error))
+                self.threads.append(t)
+                t.start()
             else:
                 reply(self.success, self.reply_error)
         elif self.reply:
@@ -194,6 +197,8 @@ def test_broken_error_object_in_reply_does_not_hang_or_grant() -> None:
     start = time.monotonic()
     assert _ask(ctx, timeout=5) is Presence.DENIED
     assert time.monotonic() - start < 2
+    for t in ctx.threads:  # l'eccezione del thread resta in questo test
+        t.join()
 
 
 def test_foreign_domain_error_is_denied_not_unavailable() -> None:

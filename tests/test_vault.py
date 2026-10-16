@@ -300,3 +300,10 @@ def test_create_never_overwrites_a_vault_created_concurrently(
 def test_non_utf8_password_is_clean_vault_error(vault_path: Path, key: Secret) -> None:
     with pytest.raises(VaultError, match="UTF-8"):
         vault.save(vault_path, key, {"web01": VaultEntry.new(Secret(b"\xff\xfe"))})
+
+
+def test_verify_accepts_right_key_and_rejects_wrong(vault_path: Path, key: Secret) -> None:
+    vault.save(vault_path, key, {"a": VaultEntry.new(pw("x"))})
+    vault.verify(vault_path, key)  # non solleva, non decodifica le voci
+    with pytest.raises(VaultAuthError):
+        vault.verify(vault_path, Secret(bytes(32)))

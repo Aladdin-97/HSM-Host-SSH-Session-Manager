@@ -199,6 +199,16 @@ def load(path: Path, key: Secret) -> dict[str, VaultEntry]:
     return _decode(_decrypt(key, data))
 
 
+def verify(path: Path, key: Secret) -> None:
+    """Verifica che `key` apra il vault, senza decodificare le voci.
+
+    Solleva VaultAuthError se la chiave è sbagliata. GCM non sa verificare
+    senza decifrare, quindi il testo in chiaro esiste comunque per un attimo
+    come bytes immutabili; evitiamo almeno di trasformarlo in oggetti.
+    """
+    _decrypt(key, _read(path))
+
+
 def save(path: Path, key: Secret, entries: dict[str, VaultEntry]) -> None:
     """Riscrive il vault con `entries`, con un nonce nuovo.
 

@@ -229,3 +229,13 @@ def test_default_runner_closes_stdin_when_no_input(monkeypatch: pytest.MonkeyPat
     keychain._run([SECURITY, "find-generic-password"], None)
     assert seen["stdin"] is subprocess.DEVNULL
     assert "input" not in seen
+
+
+@pytest.mark.parametrize(
+    "exc", [PermissionError("non eseguibile"), OSError("fork fallita"), subprocess.SubprocessError()]
+)
+def test_any_subprocess_failure_is_keychain_error(exc: BaseException) -> None:
+    # unlock ripiega sulla password solo per KeychainError: nient'altro deve
+    # sfuggire da qui, altrimenti un Keychain rotto bloccherebbe l'unlock.
+    with pytest.raises(KeychainError):
+        _kc(FakeSecurity(raises=exc)).load_key(KID)
