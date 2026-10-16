@@ -429,3 +429,19 @@ def test_host_entry_must_be_a_table(path: Path) -> None:
     _write(path, '[hosts]\nweb01 = "10.0.0.1"\n')
     with pytest.raises(InventoryError, match="web01.*tabella"):
         Inventory.load(path)
+
+
+@pytest.mark.parametrize(
+    "hostname", ["fe80::1%a b", 'fe80::1%"x', "fe80::1%a#b", "fe80::1%a\\b", "fe80::1%${HOME}", "fe80::1%-o"]
+)
+def test_ipv6_zone_is_restricted(hostname: str) -> None:
+    # ipaddress accetta qualsiasi zona; in ssh_config uno spazio o una
+    # virgoletta lì renderebbero invalido l'intero file.
+    with pytest.raises(InvalidHostError, match="hostname"):
+        web01(hostname=hostname)
+
+
+def test_identity_file_rejects_dollar() -> None:
+    # OpenSSH espande ${VAR} in IdentityFile.
+    with pytest.raises(InvalidHostError, match="identity_file"):
+        web01(identity_file="${HOME}/.ssh/id")

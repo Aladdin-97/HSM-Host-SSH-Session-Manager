@@ -57,6 +57,9 @@ _DNS_LABEL_RE = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
 _USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,31}")
 _PORT_RE = re.compile(r"[0-9]{1,5}")
+# Zona IPv6 (il nome di un'interfaccia, es. en0). ipaddress ne accetta
+# qualsiasi; noi solo caratteri che ssh_config legge senza sorprese.
+_ZONE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}")
 
 
 def is_valid_alias(alias: object) -> bool:
@@ -128,8 +131,8 @@ class Host:
                 or not ident.strip()
                 or ident.startswith("-")
                 # In ssh_config lo scriviamo tra virgolette: lì '"' chiude,
-                # "\" fa da escape e "%x" viene espanso (o fa fallire ssh).
-                or any(c in ident for c in '"\\%')
+                # "\" fa da escape, "%x" e "${VAR}" vengono espansi.
+                or any(c in ident for c in '"\\%$')
                 or not ident.isprintable()
             ):
                 self._fail("identity_file", ident)
@@ -146,8 +149,10 @@ class Host:
 
 
 def _is_ip(value: str, *, allow_zone: bool) -> bool:
-    if "%" in value and not allow_zone:
-        return False
+    if "%" in value:
+        _, _, zone = value.partition("%")
+        if not allow_zone or not _ZONE_RE.fullmatch(zone):
+            return False
     try:
         ipaddress.ip_address(value)
     except ValueError:
