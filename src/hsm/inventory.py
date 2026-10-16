@@ -59,6 +59,11 @@ _TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,31}")
 _PORT_RE = re.compile(r"[0-9]{1,5}")
 
 
+def is_valid_alias(alias: object) -> bool:
+    """True se `alias` può essere usato come alias hsm (e come Host in ssh_config)."""
+    return isinstance(alias, str) and _ALIAS_RE.fullmatch(alias) is not None
+
+
 class InventoryError(HsmError):
     """hosts.toml non valido o operazione impossibile sull'inventario."""
 
@@ -89,7 +94,7 @@ class Host:
     note: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.alias, str) or not _ALIAS_RE.fullmatch(self.alias):
+        if not is_valid_alias(self.alias):
             raise InvalidHostError(
                 f"alias non valido: {self.alias!r} (lettere, cifre, '.', '_', '-'; "
                 "deve iniziare con lettera o cifra)"
