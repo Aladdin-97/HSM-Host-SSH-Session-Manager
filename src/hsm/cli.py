@@ -39,7 +39,7 @@ from pathlib import Path
 
 from hsm import vault
 from hsm.clipboard import DEFAULT_SECONDS, Clipboard
-from hsm.connect import SSH, Connector, find_sshpass
+from hsm.connect import SSH, Connector, default_askpass_helper
 from hsm.errors import HsmError, InsecurePermissionsError, make_excepthook
 from hsm.fsutil import check_private, ensure_private_dir, locked
 from hsm.inventory import DEFAULT_PORT, Host, Inventory, is_valid_alias
@@ -108,9 +108,7 @@ class App:
         self._which = which
         self._unlocker_factory = unlocker_factory
         self._clipboard = clipboard if clipboard is not None else Clipboard()
-        self._connector = connector or Connector(
-            warn=warn, clipboard_fallback=self._clipboard.copy_with_autoclear, confirm=self._confirm
-        )
+        self._connector = connector or Connector(warn=warn)
         self._picker = picker if picker is not None else Picker()
         self._ask_raw = ask
         self._ask_secret_raw = ask_secret
@@ -508,7 +506,7 @@ class App:
             self._backups_row(),
             self._keychain_row(),
             ("ssh", SSH, "ok" if os.access(SSH, os.X_OK) else "non trovato"),
-            self._program_row("sshpass", find_sshpass(), "non installato: la password andrà incollata"),
+            self._askpass_row(),
             self._program_row("fzf", self._which("fzf"), "non installato: lista numerata"),
             ("Python", sys.executable, "esegue hsm e il watchdog degli appunti"),
         ]
@@ -550,6 +548,13 @@ class App:
         except KeychainError as exc:
             return (label, where, f"non verificabile: {exc}")
         return (label, where, "presente (sblocco con Touch ID)" if present else "assente (serve la master password)")
+
+    @staticmethod
+    def _askpass_row() -> tuple[str, str, str]:
+        helper = default_askpass_helper()
+        ok = helper.is_file() and os.access(helper, os.X_OK)
+        status = "ok (password automatica per ssh)" if ok else "mancante: reinstalla hsm"
+        return ("hsm-askpass", str(helper), status)
 
     @staticmethod
     def _program_row(name: str, found: str | None, missing: str) -> tuple[str, str, str]:

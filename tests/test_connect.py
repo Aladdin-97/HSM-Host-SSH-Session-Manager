@@ -1,6 +1,7 @@
+import io
 import os
-import stat
 import subprocess
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -8,13 +9,11 @@ from typing import Any
 
 import pytest
 
+from hsm import askpass
 from hsm.connect import SSH, Connector, build_argv
 from hsm.errors import HsmError
 from hsm.inventory import Host, Inventory
 from hsm.secret import Secret
-
-SSHPASS = "/opt/homebrew/bin/sshpass"
-
 
 def inventory(tmp_path: Path, *hosts: Host) -> Inventory:
     inv = Inventory.load(tmp_path / "missing.toml")
@@ -36,23 +35,32 @@ WEB01 = Host(
 
 @dataclass
 class FakeRunner:
-    """Registra la chiamata; legge subito dal fd passato, come farebbe sshpass."""
+    """Finto ssh: registra la chiamata e, se c'è SSH_ASKPASS, fa le domande
+    all'helper vero (askpass.main) come farebbe ssh, nell'ordine dato."""
 
     returncode: int = 0
     raises: BaseException | None = None
+    prompts: list[str] = field(default_factory=list)
     calls: list[tuple[list[str], dict[str, Any]]] = field(default_factory=list)
-    fd_content: bytes | None = None
+    answers: list[tuple[int, bytes]] = field(default_factory=list)
+    relayed: list[str] = field(default_factory=list)
 
     def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         self.calls.append((list(argv), kwargs))
         if self.raises is not None:
             raise self.raises
-        fds = kwargs.get("pass_fds") or ()
-        if fds:
-            chunks = []
-            while chunk := os.read(fds[0], 4096):
-                chunks.append(chunk)
-            self.fd_content = b"".join(chunks)
+        env = kwargs.get("env") or {}
+        if "on_spawn" in kwargs:
+            # L'helper gira qui, in-process: il suo "padre" è il nostro padre.
+            kwargs["on_spawn"](os.getppid())
+        if "SSH_ASKPASS" in env:
+            for prompt in self.prompts:
+                out = io.BytesIO()
+                code = askpass.main(
+                    [env["SSH_ASKPASS"], prompt], env=env, stdout=out,
+                    relay=lambda p: self.relayed.append(p) or None,
+                )  # fmt: skip
+                self.answers.append((code, out.getvalue()))
         return subprocess.CompletedProcess(list(argv), self.returncode)
 
 
@@ -60,23 +68,19 @@ class FakeRunner:
 class Env:
     tmp_path: Path
     runner: FakeRunner = field(default_factory=FakeRunner)
-    sshpass: str | None = SSHPASS
     warnings: list[str] = field(default_factory=list)
-    copied: list[bytes] = field(default_factory=list)
-    accept: bool = True
-    questions: list[str] = field(default_factory=list)
 
-    def confirm(self, question: str) -> bool:
-        self.questions.append(question)
-        return self.accept
-
-    def connector(self, *, with_fallback: bool = True) -> Connector:
+    def connector(self) -> Connector:
+        helper = self.tmp_path / "hsm-askpass"
+        if not helper.exists():
+            helper.write_text("#!/bin/sh\n")
+            helper.chmod(0o700)
         return Connector(
             runner=self.runner,
-            find_sshpass=lambda: self.sshpass,
             warn=self.warnings.append,
-            clipboard_fallback=(lambda s: self.copied.append(bytes(s.view()))) if with_fallback else None,
-            confirm=self.confirm,
+            askpass_helper=lambda: helper,
+            local_user=lambda: "localme",
+            resolve=lambda argv: [],
         )
 
 
@@ -173,100 +177,56 @@ def test_missing_ssh_is_clean_error(env: Env) -> None:
         env.connector().connect(BASTION, inventory(env.tmp_path, BASTION))
 
 
-# --- connect con password via sshpass ------------------------------------------
+# --- connect con password via SSH_ASKPASS --------------------------------------
+
+BASTION_PROMPT = "jump@bastion.example.com's password: "
+HOSTKEY_PROMPT = "The authenticity of host ... Are you sure you want to continue connecting (yes/no/[fingerprint])? "
 
 
-def test_password_goes_through_a_pipe_not_argv_nor_env(env: Env) -> None:
-    pw = Secret(b"s3cret-pw")
-    env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=pw)
+def test_password_reaches_ssh_via_askpass_not_argv_nor_env(env: Env) -> None:
+    env.runner.prompts = ["jump@bastion.example.com's password: "]
+    code = env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"s3cret-pw"))
+    assert code == 0
     argv, kwargs = env.runner.calls[0]
-    assert argv[:2] == [SSHPASS, "-d"]
-    fd = int(argv[2])
-    assert kwargs["pass_fds"] == (fd,)
-    assert argv[3] == SSH
-    # Il segreto non compare negli argomenti (visibili con ps) né nell'ambiente.
+    assert argv[0] == SSH
     assert not any("s3cret" in a for a in argv)
-    assert "env" not in kwargs
-    assert env.runner.fd_content == b"s3cret-pw"
+    assert not any("s3cret" in v for v in kwargs["env"].values())
+    assert kwargs["env"]["SSH_ASKPASS_REQUIRE"] == "force"
+    assert env.runner.answers == [(0, b"s3cret-pw\n")]
 
 
-def test_pipe_fds_are_closed_after_the_session(env: Env) -> None:
+def test_host_key_and_other_prompts_are_never_answered(env: Env) -> None:
+    env.runner.prompts = [HOSTKEY_PROMPT, "deploy@10.0.0.1's password: "]
     env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
-    fd = int(env.runner.calls[0][0][2])
-    with pytest.raises(OSError):
-        os.fstat(fd)
+    assert all(b"pw" not in out for _, out in env.runner.answers)
+    assert env.runner.relayed == env.runner.prompts
 
 
-def test_password_with_newline_is_rejected(env: Env) -> None:
-    # sshpass legge una riga: il resto finirebbe perso o frainteso.
-    with pytest.raises(HsmError, match="a capo"):
-        env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"a\nb"))
-    assert env.runner.calls == []
+def test_default_user_is_the_local_one(env: Env) -> None:
+    host = Host(alias="nouser", hostname="10.0.0.5")
+    env.runner.prompts = ["localme@10.0.0.5's password: "]
+    env.connector().connect(host, inventory(env.tmp_path, host), password=Secret(b"pw"))
+    assert env.runner.answers == [(0, b"pw\n")]
 
 
-@pytest.mark.parametrize("code, hint", [(5, "rifiutata"), (6, "chiave dell'host")])
-def test_sshpass_exit_codes_are_explained(env: Env, code: int, hint: str) -> None:
-    env.runner.returncode = code
-    assert env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw")) == code
-    assert any(hint in w for w in env.warnings)
+def test_rejected_password_is_reported(env: Env) -> None:
+    prompt = "jump@bastion.example.com's password: "
+    env.runner.prompts = [prompt, prompt]  # ssh la richiede: era sbagliata
+    env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
+    assert env.runner.answers[1] == (1, b"")
+    assert any("hsm pw set bastion" in w for w in env.warnings)
 
 
 def test_password_with_jump_host_warns(env: Env) -> None:
     env.connector().connect(WEB01, inventory(env.tmp_path, BASTION, WEB01), password=Secret(b"pw"))
-    assert any("jump" in w for w in env.warnings)
+    assert any("jump host" in w for w in env.warnings)
 
 
-def test_missing_sshpass_offers_clipboard_and_connects(env: Env) -> None:
-    env.sshpass = None
-    code = env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
-    assert code == 0
-    assert env.questions  # la copia negli appunti viene chiesta, non imposta
-    assert env.copied == [b"pw"]
-    argv, kwargs = env.runner.calls[0]
-    assert argv[0] == SSH and not kwargs.get("pass_fds")
-    assert any("sshpass" in w for w in env.warnings)
-
-
-def test_missing_sshpass_declined_still_connects(env: Env) -> None:
-    env.sshpass = None
-    env.accept = False
-    assert env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw")) == 0
-    assert env.copied == []
-    assert len(env.runner.calls) == 1
-
-
-def test_missing_sshpass_without_fallback_still_connects(env: Env) -> None:
-    # La spec: "senza fallire". Si collega e l'utente digita la password.
-    env.sshpass = None
-    code = env.connector(with_fallback=False).connect(
-        BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw")
-    )
-    assert code == 0
-    assert env.runner.calls[0][0][0] == SSH
-    assert any("sshpass" in w for w in env.warnings)
-
-
-# --- integrazione: pipe e pass_fds reali con un finto sshpass -------------------
-
-
-def test_real_subprocess_receives_password_on_fd(tmp_path: Path) -> None:
-    # Un finto sshpass: legge dal fd ricevuto con -d e lo salva su file.
-    # Verifica il meccanismo vero (os.pipe + pass_fds + subprocess.run).
-    scripts = tmp_path / "bin"
-    scripts.mkdir()
-    out = tmp_path / "received"
-    fake = scripts / "sshpass"
-    fake.write_text(f'#!/bin/sh\ncat <&"$2" > "{out}"\n')
-    fake.chmod(stat.S_IRWXU)
-    connector = Connector(find_sshpass=lambda: str(fake), warn=lambda _: None)
-    code = connector.connect(BASTION, inventory(tmp_path, BASTION), password=Secret(b"real-pw"))
-    assert code == 0
-    assert out.read_bytes() == b"real-pw"
-
-
-def test_password_with_carriage_return_is_rejected(env: Env) -> None:
+@pytest.mark.parametrize("bad", [b"a\nb", b"a\rb", b"a\x00b"])
+def test_password_with_line_break_is_rejected(env: Env, bad: bytes) -> None:
     with pytest.raises(HsmError, match="a capo"):
-        env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"a\rb"))
+        env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(bad))
+    assert env.runner.calls == []
 
 
 def test_oversized_password_is_rejected(env: Env) -> None:
@@ -274,27 +234,55 @@ def test_oversized_password_is_rejected(env: Env) -> None:
         env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"x" * 5000))
 
 
-# --- rilievi della security review --------------------------------------------
+def test_missing_helper_is_clean_error(env: Env, tmp_path: Path) -> None:
+    connector = Connector(runner=env.runner, warn=env.warnings.append, askpass_helper=lambda: tmp_path / "nope")
+    with pytest.raises(HsmError, match="reinstalla"):
+        connector.connect(BASTION, inventory(tmp_path, BASTION), password=Secret(b"pw"))
+    assert env.runner.calls == []
 
 
-def test_password_mode_forces_password_prompt(env: Env) -> None:
-    # Se la chiave SSH bastasse, sshpass non leggerebbe mai la pipe e la
-    # password resterebbe lì, ereditata da ssh e dai suoi figli.
-    env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
-    argv = env.runner.calls[0][0]
-    i = argv.index("PreferredAuthentications=password,keyboard-interactive")
-    assert argv[i - 1] == "-o"
-    assert i < argv.index("--")
-
-
-def test_key_mode_does_not_restrict_auth(env: Env) -> None:
+def test_key_auth_does_not_set_askpass(env: Env) -> None:
     env.connector().connect(BASTION, inventory(env.tmp_path, BASTION))
-    assert not any("PreferredAuthentications" in a for a in env.runner.calls[0][0])
+    assert "env" not in env.runner.calls[0][1]
 
 
 def test_negative_returncode_becomes_shell_style(env: Env) -> None:
     env.runner.returncode = -9  # ucciso da SIGKILL
     assert env.connector().connect(BASTION, inventory(env.tmp_path, BASTION)) == 128 + 9
+
+
+def test_default_helper_sits_next_to_the_interpreter() -> None:
+    from hsm.connect import default_askpass_helper
+
+    assert default_askpass_helper() == Path(sys.executable).parent / "hsm-askpass"
+
+
+def test_default_runner_ignores_sigint_in_parent_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    import signal
+
+    from hsm import connect
+
+    seen: list[object] = []
+
+    class FakePopen:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            # Al momento del fork il padre NON deve ancora ignorare SIGINT:
+            # SIG_IGN verrebbe ereditato da ssh.
+            seen.append(signal.getsignal(signal.SIGINT))
+
+        def wait(self) -> int:
+            seen.append(signal.getsignal(signal.SIGINT))
+            return 0
+
+    before = signal.getsignal(signal.SIGINT)
+    monkeypatch.setattr(connect.subprocess, "Popen", FakePopen)
+    assert connect._run(["/usr/bin/true"]).returncode == 0
+    assert seen[0] is not signal.SIG_IGN
+    assert seen[1] is signal.SIG_IGN
+    assert signal.getsignal(signal.SIGINT) is before
+
+
+# --- jump host -------------------------------------------------------------------
 
 
 def test_jump_alias_lookup_is_case_insensitive(tmp_path: Path) -> None:
@@ -310,85 +298,64 @@ def test_unknown_bare_jump_label_warns(tmp_path: Path) -> None:
     assert any("bastoin" in w for w in warnings)
 
 
-# --- ricerca di sshpass --------------------------------------------------------
-
-
-def _fake_bin(directory: Path, mode: int = 0o755) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    directory.chmod(0o755)
-    f = directory / "sshpass"
-    f.write_text("#!/bin/sh\n")
-    f.chmod(mode)
-    return f
-
-
-def test_find_sshpass_uses_only_fixed_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hsm.connect import find_sshpass
-
-    # Un sshpass nel PATH ma fuori dalle directory note non viene usato.
-    rogue = _fake_bin(tmp_path / "rogue")
-    monkeypatch.setenv("PATH", str(rogue.parent))
-    assert find_sshpass(dirs=[tmp_path / "empty"]) is None
-    good = _fake_bin(tmp_path / "brew")
-    assert find_sshpass(dirs=[tmp_path / "empty", tmp_path / "brew"]) == str(good)
-
-
-def test_find_sshpass_rejects_writable_binary(tmp_path: Path) -> None:
-    from hsm.connect import find_sshpass
-
-    _fake_bin(tmp_path / "brew", mode=0o777)
-    assert find_sshpass(dirs=[tmp_path / "brew"]) is None
-
-
-def test_find_sshpass_rejects_writable_directory(tmp_path: Path) -> None:
-    from hsm.connect import find_sshpass
-
-    _fake_bin(tmp_path / "brew")
-    (tmp_path / "brew").chmod(0o777)
-    try:
-        assert find_sshpass(dirs=[tmp_path / "brew"]) is None
-    finally:
-        (tmp_path / "brew").chmod(0o755)
-
-
-def test_default_runner_ignores_sigint_in_parent_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    import signal
-
-    from hsm import connect
-
-    seen: list[object] = []
-
-    class FakePopen:
-        def __init__(self, argv: list[str], **kwargs: object) -> None:
-            # Al momento del fork il padre NON deve ancora ignorare SIGINT:
-            # SIG_IGN verrebbe ereditato da ssh.
-            seen.append(signal.getsignal(signal.SIGINT))
-            self.returncode = 0
-
-        def wait(self) -> int:
-            seen.append(signal.getsignal(signal.SIGINT))
-            return 0
-
-    before = signal.getsignal(signal.SIGINT)
-    monkeypatch.setattr(connect.subprocess, "Popen", FakePopen)
-    result = connect._run(["/usr/bin/true"])
-    assert result.returncode == 0
-    assert seen[0] is not signal.SIG_IGN
-    assert seen[1] is signal.SIG_IGN  # durante la sessione Ctrl-C va a ssh
-    assert signal.getsignal(signal.SIGINT) is before  # ripristinato
-
-
-def test_find_sshpass_rejects_non_executable_or_directory(tmp_path: Path) -> None:
-    from hsm.connect import find_sshpass
-
-    _fake_bin(tmp_path / "a", mode=0o644)
-    (tmp_path / "b" / "sshpass").mkdir(parents=True)
-    assert find_sshpass(dirs=[tmp_path / "a", tmp_path / "b"]) is None
-
-
 @pytest.mark.parametrize("jump", ["10.0.0.9", "[2001:db8::1]:22", "gw.example.com"])
 def test_literal_ip_or_fqdn_jump_does_not_warn(tmp_path: Path, jump: str) -> None:
     h = Host(alias="x", hostname="x", jump_host=jump)
     warnings: list[str] = []
     build_argv(h, inventory(tmp_path, h), warn=warnings.append)
     assert warnings == []
+
+
+def test_effective_names_from_ssh_config_are_recognized(env: Env) -> None:
+    # Se ~/.ssh/config cambia HostName/User, il prompt usa quei valori.
+    connector = Connector(
+        runner=env.runner, warn=env.warnings.append, askpass_helper=env.connector()._askpass_helper,
+        local_user=lambda: "localme", resolve=lambda argv: [("realuser", "real.example.com")],
+    )  # fmt: skip
+    env.runner.prompts = ["realuser@real.example.com's password: "]
+    connector.connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
+    assert env.runner.answers == [(0, b"pw\n")]
+
+
+def test_ssh_g_resolution_parses_user_and_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hsm import connect
+
+    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert argv[:2] == [SSH, "-G"]
+        return subprocess.CompletedProcess(argv, 0, "user realuser\nhostname real.example.com\nport 22\n", "")
+
+    monkeypatch.setattr(connect.subprocess, "run", fake_run)
+    assert connect.resolve_effective_names([SSH, "-p", "22", "--", "x"]) == [("realuser", "real.example.com")]
+
+
+def test_ssh_g_failure_resolves_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hsm import connect
+
+    monkeypatch.setattr(connect.subprocess, "run", lambda argv, **k: subprocess.CompletedProcess(argv, 255, "", "err"))
+    assert connect.resolve_effective_names([SSH, "--", "x"]) == []
+
+
+def test_sigterm_during_password_session_cleans_up(env: Env) -> None:
+    import signal
+
+    seen: dict[str, object] = {}
+
+    class Inspect(FakeRunner):
+        def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            seen["handler"] = signal.getsignal(signal.SIGTERM)
+            seen["socket"] = kwargs["env"]["HSM_ASKPASS_SOCKET"]
+            return super().__call__(argv, **kwargs)
+
+    env.runner = Inspect()
+    before = signal.getsignal(signal.SIGTERM)
+    env.connector().connect(BASTION, inventory(env.tmp_path, BASTION), password=Secret(b"pw"))
+    assert seen["handler"] not in (signal.SIG_DFL, before)
+    assert signal.getsignal(signal.SIGTERM) is before
+    assert not Path(str(seen["socket"])).exists()
+
+
+def test_real_ssh_g_runs_without_network(tmp_path: Path) -> None:
+    from hsm import connect
+
+    names = connect.resolve_effective_names(build_argv(BASTION, inventory(tmp_path, BASTION)))
+    assert ("jump", "bastion.example.com") in names

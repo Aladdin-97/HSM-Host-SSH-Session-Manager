@@ -19,6 +19,8 @@ dependencies = [
 
 [project.scripts]
 hsm = "hsm.cli:main"
+# Lanciato da ssh (SSH_ASKPASS) per chiedere la password: vedi askpass.py.
+hsm-askpass = "hsm.askpass:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-cov>=5"]

@@ -15,48 +15,35 @@ Il jump_host può essere un alias dell'inventario: lo traduciamo in
 jump). Limite: l'identity_file del bastion vale solo dopo `hsm sync`,
 perché -J usa la configurazione ssh per i salti intermedi.
 
-Password (caso secondario: il default è la chiave SSH):
-- via `sshpass -d <fd>`: la password viaggia in una pipe anonima che solo
-  il processo figlio eredita. Mai negli argomenti (visibili a tutti con
-  `ps`) e mai in una variabile d'ambiente (leggibile da altri processi
-  dello stesso utente e ereditata da ogni figlio).
-- forziamo l'autenticazione a password: se la chiave SSH bastasse, sshpass
-  non leggerebbe mai la pipe e la password resterebbe lì, ereditata da ssh.
-- sshpass viene cercato solo in directory di sistema note, non nel PATH:
-  un "sshpass" finto in una directory scrivibile riceverebbe la password.
-- sshpass risponde a un solo prompt: con un jump host, il bastion deve
-  accettare la chiave SSH.
-- se sshpass non c'è lo diciamo, proponiamo di copiare la password negli
-  appunti e ci colleghiamo comunque: l'utente la incolla al prompt.
+Password (caso secondario: il default è la chiave SSH): ssh la chiede a
+`hsm-askpass` tramite SSH_ASKPASS, senza programmi esterni (vedi
+askpass.py). La password non passa mai dagli argomenti (visibili con `ps`)
+né dall'ambiente; viene data solo alla domanda esatta dell'host di
+destinazione, una volta. Ogni altra domanda (chiave host sconosciuta,
+password del bastion, OTP) la vedi tu sul terminale.
 """
 
+import contextlib
+import getpass
 import ipaddress
 import os
 import signal
-import stat
 import subprocess
-from collections.abc import Callable, Iterable, Sequence
+import sys
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
+from hsm.askpass import AskpassServer
 from hsm.errors import HsmError
 from hsm.inventory import Host, Inventory
 from hsm.secret import Secret
 
 SSH = "/usr/bin/ssh"
 
-# Dove cerchiamo sshpass: Homebrew (Apple Silicon e Intel), poi il sistema.
-SSHPASS_DIRS = (Path("/opt/homebrew/bin"), Path("/usr/local/bin"), Path("/usr/bin"))
-
-# Una password più lunga di così è certamente un errore; e resta molto sotto
-# la capacità della pipe (16 KiB su macOS), quindi la scrittura non si blocca.
+# Una password più lunga di così è certamente un errore.
 _MAX_PASSWORD = 4096
-
-# Codici d'uscita di sshpass (vedi `man sshpass`).
-_SSHPASS_BAD_PASSWORD = 5
-_SSHPASS_UNKNOWN_HOST_KEY = 6
-
-_FORCE_PASSWORD = ["-o", "PreferredAuthentications=password,keyboard-interactive"]
 
 Runner = Callable[..., subprocess.CompletedProcess[bytes]]
 
@@ -65,12 +52,14 @@ def _run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[byte
     """Esegue la sessione nel terminale corrente e ne attende la fine.
 
     Durante la sessione Ctrl-C deve arrivare a ssh, non a noi: se Python
-    reagisse, subprocess ucciderebbe il figlio diretto (sshpass) lasciando
-    ssh orfano e il terminale in modalità raw. Per questo ignoriamo SIGINT,
-    ma solo DOPO aver avviato il figlio: SIG_IGN si eredita, e ssh non
-    potrebbe più essere interrotto.
+    reagisse, subprocess ucciderebbe ssh lasciando il terminale in modalità
+    raw. Per questo ignoriamo SIGINT, ma solo DOPO aver avviato il figlio:
+    SIG_IGN si eredita, e ssh non potrebbe più essere interrotto.
     """
+    on_spawn = kwargs.pop("on_spawn", None)
     proc = subprocess.Popen(list(argv), **kwargs)
+    if on_spawn is not None:
+        on_spawn(proc.pid)
     previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         returncode = proc.wait()
@@ -79,43 +68,65 @@ def _run(argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[byte
     return subprocess.CompletedProcess(list(argv), returncode)
 
 
-def find_sshpass(dirs: Iterable[Path] = SSHPASS_DIRS) -> str | None:
-    """Il percorso di un sshpass affidabile, o None.
+def default_askpass_helper() -> Path:
+    """`hsm-askpass` installato accanto all'interprete che esegue hsm.
 
-    Affidabile = file regolare eseguibile, di root o dell'utente, non
-    scrivibile da gruppo o altri, in una directory con le stesse regole.
-    Seguiamo i symlink (Homebrew li usa) e controlliamo la destinazione.
+    Cerchiamo lì e non nel PATH: è la console script dello stesso pacchetto,
+    nello stesso virtualenv (o tool di uv). Un "hsm-askpass" finto nel PATH
+    riceverebbe la password.
     """
-    for directory in dirs:
-        candidate = directory / "sshpass"
-        try:
-            real = candidate.resolve(strict=True)
-        except (FileNotFoundError, RuntimeError):
-            continue
-        if _trusted(real, directory=False) and _trusted(real.parent, directory=True) and _trusted(
-            directory, directory=True
-        ):
-            return str(real)
-    return None
+    return Path(sys.executable).parent / "hsm-askpass"
 
 
-def _trusted(path: Path, *, directory: bool) -> bool:
+def resolve_effective_names(argv: Sequence[str]) -> list[tuple[str, str]]:
+    """(utente, host) effettivi secondo `ssh -G` per questi argomenti.
+
+    ~/.ssh/config può cambiare HostName o User, e la domanda della password
+    usa quei valori. `ssh -G` stampa la configurazione risolta senza
+    collegarsi. Se fallisce non è grave: la password verrà chiesta a te.
+    """
     try:
-        st = os.stat(path)
-    except OSError:
-        return False
-    if directory != stat.S_ISDIR(st.st_mode):
-        return False
-    if not directory and not (stat.S_ISREG(st.st_mode) and st.st_mode & stat.S_IXUSR):
-        return False
-    return st.st_uid in (0, os.getuid()) and not st.st_mode & 0o022
+        result = subprocess.run(
+            [SSH, "-G", *argv[1:]],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    values = dict(line.split(" ", 1) for line in result.stdout.splitlines() if " " in line)
+    if "user" in values and "hostname" in values:
+        return [(values["user"], values["hostname"])]
+    return []
+
+
+@contextlib.contextmanager
+def _exit_on_termination() -> Iterator[None]:
+    """SIGTERM/SIGHUP (es. finestra del terminale chiusa) diventano SystemExit.
+
+    Il default ucciderebbe Python senza eseguire i `with`: resterebbe il
+    socket in $TMPDIR e la password non verrebbe azzerata.
+    """
+
+    def stop(signum: int, frame: FrameType | None) -> None:
+        raise SystemExit(128 + signum)
+
+    previous = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def build_argv(
     host: Host,
     inventory: Inventory,
     *,
-    password_auth: bool = False,
     warn: Callable[[str], None] | None = None,
 ) -> list[str]:
     """Gli argomenti di /usr/bin/ssh per `host`."""
@@ -131,98 +142,67 @@ def build_argv(
         # il server può chiudere ("Too many authentication failures") prima
         # di arrivare a quella indicata.
         argv += ["-i", os.path.expanduser(host.identity_file), "-o", "IdentitiesOnly=yes"]
-    if password_auth:
-        argv += _FORCE_PASSWORD
     argv += ["--", host.hostname]
     return argv
 
 
 class Connector:
-    """Lancia ssh (o sshpass + ssh). Le dipendenze esterne sono iniettabili."""
+    """Lancia ssh. Le dipendenze esterne sono iniettabili per i test."""
 
     def __init__(
         self,
         *,
         runner: Runner = _run,
-        find_sshpass: Callable[[], str | None] = find_sshpass,
         warn: Callable[[str], None],
-        clipboard_fallback: Callable[[Secret], None] | None = None,
-        confirm: Callable[[str], bool] | None = None,
+        askpass_helper: Callable[[], Path] = default_askpass_helper,
+        local_user: Callable[[], str] = getpass.getuser,
+        resolve: Callable[[Sequence[str]], list[tuple[str, str]]] = resolve_effective_names,
     ) -> None:
         self._runner = runner
-        self._find_sshpass = find_sshpass
         self._warn = warn
-        self._clipboard_fallback = clipboard_fallback
-        self._confirm = confirm
+        self._askpass_helper = askpass_helper
+        self._local_user = local_user
+        self._resolve = resolve
 
     def connect(self, host: Host, inventory: Inventory, *, password: Secret | None = None) -> int:
         """Apre la sessione e restituisce il codice d'uscita (stile shell)."""
+        argv = build_argv(host, inventory, warn=self._warn)
         if password is None:
-            return self._spawn(build_argv(host, inventory, warn=self._warn))
+            return self._spawn(argv)
 
         # Un memoryview contiene interi: `b"\n" in view` sarebbe sempre False.
         view = password.view()
-        if 0x0A in view or 0x0D in view:
-            raise HsmError("La password contiene un a capo: sshpass non può usarla.")
+        if 0x0A in view or 0x0D in view or 0x00 in view:
+            raise HsmError("La password contiene un a capo: ssh non può riceverla.")
         if len(password) > _MAX_PASSWORD:
-            raise HsmError("La password è troppo lunga per essere passata a sshpass.")
-        argv = build_argv(host, inventory, password_auth=True, warn=self._warn)
+            raise HsmError("La password è troppo lunga.")
+        helper = self._askpass_helper()
+        if not (helper.is_file() and os.access(helper, os.X_OK)):
+            raise HsmError(
+                f"{helper} non trovato: reinstalla hsm (uv tool install --reinstall .) "
+                "oppure, nel progetto, lancia uv sync."
+            )
         if host.jump_host is not None:
             self._warn(
-                f"La password vale solo per {host.alias}: il jump host deve accettare "
-                "la tua chiave SSH (sshpass risponde a un solo prompt)."
+                f"La password salvata vale solo per {host.alias}: le altre richieste "
+                "(es. il jump host) le inserisci tu."
             )
 
-        sshpass = self._find_sshpass()
-        if sshpass is None:
-            return self._connect_without_sshpass(argv, password)
-
-        code = self._spawn_with_password(sshpass, argv, password)
-        # sshpass restituisce anche il codice della sessione remota: un
-        # `exit 5` sul server sarebbe indistinguibile, da qui il "probabilmente".
-        if code == _SSHPASS_BAD_PASSWORD:
+        # ssh usa l'utente locale quando `user` non è indicato: la domanda
+        # che riconosciamo deve avere lo stesso nome.
+        user = host.user if host.user is not None else self._local_user()
+        server = AskpassServer(password, user=user, hostname=host.hostname, aliases=self._resolve(argv))
+        with _exit_on_termination(), server:
+            env = {**os.environ, **server.env(str(helper))}
+            # on_spawn: il server deve conoscere il pid di ssh per dare la
+            # password solo ai suoi helper (non al ssh del jump host).
+            code = self._spawn(argv, env=env, on_spawn=server.expect_ssh)
+        if server.rejected:
             self._warn(
-                "sshpass ha restituito 5: probabilmente la password è stata rifiutata. "
-                f"Quella nel vault è ancora valida? (hsm pw set {host.alias})"
-            )
-        elif code == _SSHPASS_UNKNOWN_HOST_KEY:
-            self._warn(
-                "sshpass ha restituito 6: probabilmente non può confermare la chiave "
-                "dell'host sconosciuta. Collegati una volta senza password per "
-                "verificarla e accettarla."
+                f"Il server ha rifiutato la password salvata per {host.alias}: "
+                f"aggiornala con hsm pw set {host.alias}."
             )
         return code
-
-    def _connect_without_sshpass(self, argv: list[str], password: Secret) -> int:
-        self._warn(
-            "sshpass non trovato in "
-            + ", ".join(str(d) for d in SSHPASS_DIRS)
-            + " (es. brew install hudochenkov/sshpass/sshpass): la password andrà "
-            "digitata o incollata al prompt di ssh."
-        )
-        if (
-            self._clipboard_fallback is not None
-            and self._confirm is not None
-            and self._confirm("Copio la password negli appunti? (verrà cancellata dopo 30 s)")
-        ):
-            self._clipboard_fallback(password)
-        return self._spawn(argv)
-
-    def _spawn_with_password(self, sshpass: str, argv: list[str], password: Secret) -> int:
-        # Pipe anonima: non ha un nome sul filesystem, quindi nessun altro
-        # processo può aprirla. La scriviamo tutta e chiudiamo il lato di
-        # scrittura prima di lanciare sshpass: lui leggerà fino a EOF.
-        read_fd, write_fd = os.pipe()
-        try:
-            try:
-                _write_all(write_fd, password.view())
-            finally:
-                os.close(write_fd)
-            # pass_fds: il figlio eredita solo questo descriptor (gli altri
-            # di Python sono non ereditabili per default, PEP 446).
-            return self._spawn([sshpass, "-d", str(read_fd), *argv], pass_fds=(read_fd,))
-        finally:
-            os.close(read_fd)
 
     def _spawn(self, argv: list[str], **kwargs: Any) -> int:
         try:
@@ -231,12 +211,6 @@ class Connector:
             raise HsmError(f"{argv[0]} non trovato.") from None
         # Ucciso da un segnale: subprocess dà -N, la shell userebbe 128+N.
         return 128 - code if code < 0 else code
-
-
-def _write_all(fd: int, data: memoryview) -> None:
-    while data:
-        written = os.write(fd, data)
-        data = data[written:]
 
 
 def _find_alias(inventory: Inventory, name: str) -> Host | None:
