@@ -114,6 +114,48 @@ To check that everything is in place:
 hsm paths
 ```
 
+### Bash completion
+
+`hsm completion bash` prints a completion script. It completes commands,
+nested actions (`pw get`, `vault rekey`), the options of the command you are
+typing, your **host aliases** where one is expected (`connect`, `edit`, `rm`,
+`pw …`, `--jump`), your **tags** for `--tag`, files for `--identity`, and the
+values of `--sort`.
+
+```text
+hsm con<TAB>          →  hsm connect
+hsm connect we<TAB>   →  web01  web02
+hsm pw <TAB>          →  get  rm  set
+hsm add web03 --<TAB> →  --dry-run --hostname --identity --ip --jump --note --password …
+hsm ls --tag p<TAB>   →  hsm ls --tag prod
+```
+
+With [bash-completion](https://github.com/scop/bash-completion) installed
+(Homebrew: `bash-completion@2`), save it where it is loaded on demand, the
+first time you press TAB after `hsm`:
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+```
+
+```bash
+hsm completion bash > ~/.local/share/bash-completion/completions/hsm
+```
+
+Without bash-completion, add this line to `~/.bashrc` instead (it runs hsm
+once at every shell start):
+
+```bash
+eval "$(hsm completion bash)"
+```
+
+Commands and options are written into the script when you generate it:
+regenerate it after updating hsm. Aliases and tags are always current,
+because they are read from `hosts.toml` at TAB time by a hidden helper
+(`hsm __complete aliases|tags`). The helper reads nothing else, prints
+nothing on errors, and still refuses a `hosts.toml` with the wrong
+permissions. The script works with macOS's `/bin/bash` 3.2 and with bash 5.
+
 ---
 
 ## Getting started
@@ -181,6 +223,7 @@ Added db.
 | `hsm vault rekey` | Changes the master password |
 | `hsm sync` | Regenerates the hsm block in `~/.ssh/config` |
 | `hsm paths` | Shows every file and program used, with its status |
+| `hsm completion bash` | Prints the bash completion script (see [Bash completion](#bash-completion)) |
 
 **Global options**
 - `--debug`: on error, shows the full traceback, which never contains local
@@ -695,6 +738,7 @@ src/hsm/
 ├── connect.py     ssh arguments, ProxyJump, session with askpass
 ├── clipboard.py   clipboard with automatic clearing (hsm pw get)
 ├── picker.py      picker: fzf or numbered list
+├── completion.py  bash completion script, generated from the argparse parser
 └── cli.py         command line: wires the modules together
 ```
 

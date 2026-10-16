@@ -891,3 +891,39 @@ def test_paths_never_unlocks(env: Env) -> None:
     before = env.unlocks
     _paths_rows(env)
     assert env.unlocks == before
+
+
+# --- completion helpers ------------------------------------------------------------
+
+
+def test_complete_aliases_and_tags(env: Env) -> None:
+    env.run("add", "web02", "--ip", "10.0.0.2", "--tag", "prod")
+    _add_web01(env, "--tag", "web", "--tag", "prod")
+    env.out.clear()
+    env.run("__complete", "aliases")
+    assert env.out == ["web01", "web02"]
+    env.out.clear()
+    env.run("__complete", "tags")
+    assert env.out == ["prod", "web"]
+
+
+def test_complete_is_silent_on_any_problem(env: Env) -> None:
+    _add_web01(env)
+    env.paths.hosts.chmod(0o644)
+    env.out.clear()
+    assert env.run("__complete", "aliases") == 0
+    assert env.out == []
+
+
+def test_complete_and_completion_skip_preflight(env: Env) -> None:
+    _add_web01(env)
+    env.paths.config_dir.chmod(0o755)  # other commands refuse to start
+    assert main(["completion", "bash"], app=env.app()) == 0
+    assert main(["__complete", "aliases"], app=env.app()) == 0
+    env.paths.config_dir.chmod(0o700)
+
+
+def test_complete_command_is_hidden_from_help(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--help"])
+    assert "__complete" not in capsys.readouterr().out

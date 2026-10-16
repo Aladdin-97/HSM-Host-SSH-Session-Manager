@@ -39,6 +39,7 @@ from pathlib import Path
 
 from hsm import vault
 from hsm.clipboard import DEFAULT_SECONDS, Clipboard
+from hsm.completion import bash_script
 from hsm.connect import SSH, Connector, default_askpass_helper
 from hsm.errors import HsmError, InsecurePermissionsError, make_excepthook
 from hsm.fsutil import check_private, ensure_private_dir, locked
@@ -149,6 +150,12 @@ class App:
                 return self.sync(dry_run=args.dry_run)
             case "paths":
                 return self.show_paths()
+            case "completion":
+                # print() adds the final newline the script already ends with.
+                self._out(bash_script(build_parser()).rstrip("\n"))
+                return 0
+            case "__complete":
+                return self.complete(args.kind)
         raise HsmError(f"Unknown command: {args.command}")  # pragma: no cover - argparse prevents it
 
     # --- inventory ----------------------------------------------------------
@@ -488,6 +495,23 @@ class App:
 
     # --- diagnostics ------------------------------------------------------------
 
+    def complete(self, kind: str) -> int:
+        """Print aliases or tags, one per line, for the completion script.
+
+        Any problem (missing file, wrong permissions, invalid TOML) prints
+        nothing: hosts.toml is still read with all its checks, but a TAB
+        must never show an error.
+        """
+        try:
+            hosts = Inventory.load(self.paths.hosts).hosts()
+        except (HsmError, OSError):
+            return 0
+        names = [h.alias for h in hosts] if kind == "aliases" else sorted({t for h in hosts for t in h.tags})
+        for name in names:
+            self._out(name)
+        return 0
+
+
     def show_paths(self) -> int:
         """Every file and program hsm uses, with its status.
 
@@ -752,6 +776,15 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--dry-run", action="store_true")
 
     sub.add_parser("paths", help="show every file and program used, with its status")
+
+    completion = sub.add_parser("completion", help="print the shell completion script")
+    completion.add_argument("shell", choices=("bash",))
+
+    # Hidden helper for the completion script: lists aliases or tags. No
+    # `help=`: argparse lists only subcommands that have one (help=SUPPRESS
+    # would print "==SUPPRESS==" on Python 3.12).
+    helper = sub.add_parser("__complete")
+    helper.add_argument("kind", choices=("aliases", "tags"))
     return parser
 
 
@@ -766,9 +799,10 @@ def main(argv: Sequence[str] | None = None, *, app: App | None = None) -> int:
     sys.excepthook = make_excepthook(debug=args.debug)
     _harden()
     app = app if app is not None else App(Paths.default())
-    # `paths` is the diagnostic: it must work even with wrong permissions,
-    # in order to show them. It writes nothing and reads no secrets, so it can.
-    if args.command != "paths":
+    # These never write and never read secrets, so they can skip the startup
+    # check: `paths` must work with wrong permissions in order to show them,
+    # and completion must stay silent instead of failing on every TAB.
+    if args.command not in ("paths", "completion", "__complete"):
         app.preflight()
     return app.run(args)
 
