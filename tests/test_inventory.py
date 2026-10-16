@@ -452,3 +452,27 @@ def test_identity_file_must_be_absolute_or_home_relative() -> None:
     with pytest.raises(InvalidHostError, match="identity_file"):
         web01(identity_file="keys/id_ed25519")
     assert web01(identity_file="/etc/ssh/id").identity_file == "/etc/ssh/id"
+
+
+# --- campo auth -----------------------------------------------------------------
+
+
+def test_auth_defaults_to_key_and_is_not_written(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(Host(alias="a", hostname="a"))
+    assert inv.get("a").auth == "key"
+    assert "auth" not in inv.save(dry_run=True)
+
+
+def test_auth_password_roundtrip(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(Host(alias="a", hostname="a", auth="password"))
+    inv.save()
+    assert 'auth = "password"' in path.read_text()
+    assert Inventory.load(path).get("a").auth == "password"
+
+
+@pytest.mark.parametrize("bad", ["", "Password", "keyboard", "none"])
+def test_auth_rejects_unknown_values(bad: str) -> None:
+    with pytest.raises(InvalidHostError, match="auth"):
+        web01(auth=bad)

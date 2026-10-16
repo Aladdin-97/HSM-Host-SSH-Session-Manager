@@ -10,6 +10,11 @@ Formato, una tabella per host:
     jump_host = "bastion"            # alias hsm oppure [user@]host[:port]
     identity_file = "~/.ssh/id_ed25519"
     note = "frontend principale"
+    auth = "password"                # omesso se "key" (il default)
+
+`auth` dice solo COME ci si autentica, mai con cosa: serve a `hsm connect`
+per sapere se aprire il vault senza dover chiedere il Touch ID per gli
+host che usano la chiave SSH. Lo impostano `hsm pw set` / `hsm pw rm`.
 
 Due scelte che contano:
 
@@ -47,6 +52,7 @@ from hsm.errors import HsmError
 from hsm.fsutil import atomic_write, ensure_private_dir, read_private
 
 DEFAULT_PORT = 22
+AUTH_METHODS = ("key", "password")
 
 # Alias: finisce nella riga "Host <alias>" di ssh_config, dove spazi e
 # caratteri jolly (*, ?, !) cambierebbero il significato.
@@ -95,6 +101,7 @@ class Host:
     jump_host: str | None = None
     identity_file: str | None = None
     note: str | None = None
+    auth: str = "key"
 
     def __post_init__(self) -> None:
         if not is_valid_alias(self.alias):
@@ -141,6 +148,8 @@ class Host:
         if self.note is not None and (not isinstance(self.note, str) or not self.note.isprintable()):
             # isprintable() esclude a capo e sequenze di escape del terminale.
             self._fail("note", self.note)
+        if self.auth not in AUTH_METHODS:
+            self._fail("auth", self.auth)
 
     def _check(self, field: str, pattern: re.Pattern[str], value: object) -> None:
         if not isinstance(value, str) or not pattern.fullmatch(value):
@@ -212,6 +221,7 @@ _FILE_TYPES: dict[str, tuple[type, str]] = {
     "jump_host": (str, "una stringa"),
     "identity_file": (str, "una stringa"),
     "note": (str, "una stringa"),
+    "auth": (str, '"key" o "password"'),
 }
 
 
@@ -374,4 +384,5 @@ def _to_file(host: Host) -> dict[str, Any]:
         "jump_host": host.jump_host,
         "identity_file": host.identity_file,
         "note": host.note,
+        "auth": host.auth if host.auth != "key" else None,
     }

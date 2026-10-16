@@ -12,6 +12,8 @@ import fcntl
 import os
 import stat
 import tempfile
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from hsm.errors import HsmError, InsecurePermissionsError
@@ -154,3 +156,40 @@ def atomic_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
         _full_fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+@contextlib.contextmanager
+def locked(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
+    """Lock esclusivo tra processi hsm, tenuto per tutta la durata del `with`.
+
+    Serve attorno a lettura-modifica-scrittura del vault: senza, due
+    `hsm pw set` in parallelo leggerebbero lo stesso file e il secondo
+    salvataggio cancellerebbe la modifica del primo.
+    flock è "consultivo": protegge solo da chi usa lo stesso lock, cioè da
+    altri hsm, che è quello che ci serve. Il lock sparisce con il processo,
+    quindi un crash non lascia file bloccati.
+    """
+    check_private(path.parent)
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise InsecurePermissionsError(f"{path} è un symlink: hsm richiede un file reale.") from None
+        raise
+    try:
+        _verify(os.fstat(fd), path)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise HsmError(
+                        f"Un altro hsm sta modificando il vault ({path}): riprova tra poco."
+                    ) from None
+                time.sleep(0.1)
+        yield
+    finally:
+        os.close(fd)  # chiudere il descriptor rilascia il lock

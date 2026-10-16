@@ -192,3 +192,55 @@ def test_falls_back_to_fsync_when_full_fsync_unsupported(
     monkeypatch.setattr(fcntl, "fcntl", unsupported)
     atomic_write(tmp_path / "f", b"data")
     assert (tmp_path / "f").read_bytes() == b"data"
+
+
+# --- lock ------------------------------------------------------------------------
+
+
+def test_locked_creates_private_lockfile_and_excludes_others(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    from hsm.fsutil import locked
+
+    lock = tmp_path / "vault.lock"
+    with locked(lock):
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        # Un altro processo non riesce a prendere il lock (LOCK_NB).
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import fcntl,os,sys; fd=os.open(sys.argv[1], os.O_RDWR);"
+             "fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)", str(lock)],
+            capture_output=True,
+        )  # fmt: skip
+        assert probe.returncode != 0
+    # Rilasciato all'uscita dal blocco.
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import fcntl,os,sys; fd=os.open(sys.argv[1], os.O_RDWR);"
+         "fcntl.flock(fd, fcntl.LOCK_EX|fcntl.LOCK_NB)", str(lock)],
+        capture_output=True,
+    )  # fmt: skip
+    assert probe.returncode == 0
+
+
+def test_locked_refuses_symlinked_lockfile(tmp_path: Path) -> None:
+    from hsm.fsutil import locked
+
+    (tmp_path / "elsewhere").write_text("")
+    (tmp_path / "vault.lock").symlink_to(tmp_path / "elsewhere")
+    with pytest.raises(InsecurePermissionsError):
+        with locked(tmp_path / "vault.lock"):
+            pass
+
+
+def test_locked_times_out_with_clear_message(tmp_path: Path) -> None:
+    from hsm.fsutil import locked
+
+    lock = tmp_path / "vault.lock"
+    # flock vale per descriptor: un secondo open nello stesso processo
+    # trova il lock occupato, come lo troverebbe un altro hsm.
+    with locked(lock):
+        with pytest.raises(HsmError, match="altro hsm"):
+            with locked(lock, timeout=0.2):
+                pass
