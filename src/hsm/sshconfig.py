@@ -100,6 +100,9 @@ def render(hosts: Iterable[Host]) -> str:
             # Tra virgolette perché il percorso può contenere spazi; Host ha
             # già escluso '"', '\\' e '%' da identity_file.
             lines.append(f'    IdentityFile "{_value(host.identity_file, quoted=True)}"')
+            # Senza, ssh prova prima tutte le chiavi dell'agent e il server
+            # può chiudere per troppi tentativi prima di arrivare a questa.
+            lines.append("    IdentitiesOnly yes")
         lines.append("")
     lines += ["# Riporta lo scope a globale per le righe che seguono il blocco.", "Host *", END]
     return "\n".join(lines) + "\n"

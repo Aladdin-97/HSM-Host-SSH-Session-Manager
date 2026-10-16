@@ -129,7 +129,9 @@ class Host:
                 not isinstance(ident, str)
                 or not ident
                 or not ident.strip()
-                or ident.startswith("-")
+                # Assoluto o relativo alla home: un percorso relativo
+                # dipenderebbe dalla directory da cui si lancia hsm.
+                or not ident.startswith(("/", "~"))
                 # In ssh_config lo scriviamo tra virgolette: lì '"' chiude,
                 # "\" fa da escape, "%x" e "${VAR}" vengono espansi.
                 or any(c in ident for c in '"\\%$')

@@ -445,3 +445,10 @@ def test_identity_file_rejects_dollar() -> None:
     # OpenSSH espande ${VAR} in IdentityFile.
     with pytest.raises(InvalidHostError, match="identity_file"):
         web01(identity_file="${HOME}/.ssh/id")
+
+
+def test_identity_file_must_be_absolute_or_home_relative() -> None:
+    # Un percorso relativo dipenderebbe dalla directory corrente.
+    with pytest.raises(InvalidHostError, match="identity_file"):
+        web01(identity_file="keys/id_ed25519")
+    assert web01(identity_file="/etc/ssh/id").identity_file == "/etc/ssh/id"

@@ -330,3 +330,9 @@ def test_concurrent_edit_is_detected_and_not_overwritten(
     with pytest.raises(SshConfigError, match="modificato"):
         apply(cfg, render([WEB01]), now=NOW)
     assert "edited-meanwhile" in cfg.read_text()
+
+
+def test_identity_file_comes_with_identities_only() -> None:
+    # Senza, ssh prova prima tutte le chiavi dell'agent e il server può
+    # chiudere per "Too many authentication failures" prima di arrivare a -i.
+    assert '    IdentityFile "~/.ssh/id_ed25519"\n    IdentitiesOnly yes\n' in render([WEB01])
