@@ -51,8 +51,10 @@ disco smarrito, un repository di dotfile pubblicato per errore.
   file già aperto (`fstat`), così il file non può essere scambiato tra il
   controllo e la lettura.
 - **La password di un host non compare mai negli argomenti dei processi**
-  (visibili a tutti con `ps`) **né in una variabile d'ambiente.** A sshpass
-  arriva tramite una pipe anonima che solo il processo figlio eredita.
+  (visibili a tutti con `ps`) **né in una variabile d'ambiente.** ssh la
+  ottiene da `hsm-askpass`, che la riceve da hsm su un socket Unix in una
+  directory 0700 creata per quel connect, con un token casuale. Un altro
+  utente non può nemmeno vedere il socket.
 - **La chiave del vault viene passata a `security` su stdin** (`security
   -i`), mai come argomento.
 - **Il processo che svuota gli appunti riceve solo un contatore e una
@@ -79,6 +81,34 @@ script.
   file dice che `prod-db` è `attacker.example.com`, hsm ti collega lì, e con
   `auth = "password"` manda lì la password. Un `hosts.toml` condiviso va
   trattato come codice: va letto prima di usarlo.
+
+### ✅ Un server o un bastion malevolo che prova a farsi dare la password
+
+Il caso: ti colleghi a `legacy01` passando da un bastion, e il bastion (o un
+server finto) prova a ottenere la password di `legacy01`, oppure a farsi
+accettare senza che tu ne verifichi la chiave.
+
+- **La password va solo alla domanda esatta dell'host di destinazione**,
+  `utente@host's password: ` o la variante keyboard-interactive, e solo una
+  volta.
+- **Un server non può imitare quella domanda.** Il testo keyboard-interactive
+  lo sceglie il server, ma ssh lo prefissa sempre con `(utente@host)` dell'host
+  a cui sta parlando davvero. La domanda di un bastion non può quindi
+  presentarsi come quella della destinazione.
+- **Il ssh del jump host non riceve la password**, nemmeno se il bastion ha
+  lo stesso `utente@host` della destinazione su un'altra porta (una NAT, un
+  bastion sulla stessa macchina). hsm la consegna solo a un helper figlio
+  del processo ssh principale, e il pid lo verifica il kernel
+  (`LOCAL_PEERPID`), non lo dichiara l'helper. Verificato con due sshd veri
+  sulla stessa macchina.
+- **La conferma di una chiave host sconosciuta non riceve mai una risposta
+  automatica.** Con `SSH_ASKPASS_REQUIRE=force` anche quella domanda passa
+  dall'helper: un "yes" automatico accetterebbe un server qualsiasi
+  (verificato con un helper di prova, che l'ha fatto). hsm la gira a te.
+- **Il testo delle domande viene ripulito** dai caratteri di controllo prima
+  di arrivare al terminale, e la risposta si vede mentre la scrivi solo per
+  la vera domanda di ssh sulla chiave host: un server non può far comparire
+  sullo schermo un OTP digitato.
 
 ### ⚠️ Qualcuno con il tuo Mac sbloccato tra le mani
 
@@ -108,7 +138,16 @@ dell'editor.
   scrivibili dal tuo utente e quindi hanno lo stesso livello di fiducia di
   hsm stesso;
 - modificare `hosts.toml`, perché i permessi 0600 non fermano il
-  proprietario.
+  proprietario;
+- durante un `hsm connect`, leggere token e percorso del socket
+  dall'ambiente di ssh e chiedere la password al posto dell'helper.
+
+Un caso particolare dello stesso confine: i comandi che il tuo
+`~/.ssh/config` fa lanciare a ssh (`ProxyCommand`, `LocalCommand`,
+`Match exec`) sono figli di ssh come l'helper, ereditano token e socket, e
+potrebbero ottenere la password. Sono comandi che hai configurato tu: se ne
+includi da file che non controlli (un `Include` condiviso), trattali come
+codice con accesso alle tue password.
 
 È la stessa situazione di un `~/.ssh/id_ed25519` senza passphrase: sul tuo
 utente compromesso nessuno strumento in user space resiste.
@@ -171,22 +210,36 @@ in hsm sono il default, e la password è il caso secondario.
   modifica `hosts.toml` mentre hsm lavora può ancora perdere una modifica
   (la sync di `~/.ssh/config` invece se ne accorge e si ferma).
 
-### Connessione con password (sshpass)
+### Connessione con password (SSH_ASKPASS)
 
-- `sshpass` risponde a **un solo prompt**: con un jump host, il bastion deve
-  accettare la tua chiave SSH.
-- `sshpass` **non sa accettare una chiave host nuova** (esce con codice 6).
-  La prima connessione va fatta senza password, e la chiave va verificata
-  a mano. hsm non cambia mai `StrictHostKeyChecking`.
-- Il processo `sshpass` tiene la password in memoria per tutta la sessione.
-- `sshpass` viene cercato solo in `/opt/homebrew/bin`, `/usr/local/bin` e
-  `/usr/bin`, e scartato se è scrivibile da altri. Uno `sshpass` finto nel
-  `PATH` non riceve la password.
-- **Senza sshpass** (come su questo Mac oggi), hsm propone di copiare la
-  password negli appunti e ti collega comunque: la incolli tu.
+- **Niente programmi esterni.** ssh chiede la password a `hsm-askpass`, che
+  sta accanto all'interprete Python di hsm e non viene cercato nel `PATH`:
+  un helper finto nel `PATH` non riceverebbe nulla. Richiede OpenSSH ≥ 8.4
+  (`SSH_ASKPASS_REQUIRE`).
+- **Il socket esiste solo durante il connect** e viene rimosso alla fine,
+  anche con SIGTERM o SIGHUP (finestra del terminale chiusa). Con un
+  `kill -9` resta una directory vuota in `$TMPDIR` con un socket morto:
+  nessun segreto su disco.
+- **Una consegna sola.** Se il server rifiuta la password, ssh la chiede di
+  nuovo e la domanda passa a te. Alla fine hsm ti dice di aggiornarla.
+- **Corrispondenza fragile, ma che fallisce in modo sicuro.** Se il tuo
+  `~/.ssh/config` cambia `HostName` o `User`, hsm prova a seguirli con
+  `ssh -G`; se il prompt non combacia comunque (canonicalizzazione dei nomi,
+  server con prompt insoliti), la password non viene consegnata e la
+  digiti tu.
+- **La password del bastion non è automatica:** se il jump host la chiede,
+  la digiti tu. Il vault contiene la password della destinazione.
+- **Durante la sessione** in memoria resta solo la password necessaria:
+  chiave del vault e altre voci sono già azzerate. L'helper vive solo il
+  tempo di rispondere.
+- **`ssh <alias>` da un terminale normale** (dopo `hsm sync`) non usa hsm:
+  lì la password la digiti tu. La consegna automatica c'è solo con
+  `hsm connect`.
 
-### Appunti
+### Appunti (`hsm pw get`)
 
+- Servono solo per copiare una password a mano: `hsm connect` non li usa
+  più.
 - Per 30 secondi **qualsiasi app** può leggere la password dagli appunti.
 - I tipi `Concealed` e `Transient` chiedono ai gestori di cronologia (Maccy,
   Raycast, Paste…) di non salvarla. Un gestore che li ignora la salva
@@ -235,16 +288,31 @@ in hsm sono il default, e la password è il caso secondario.
 
 ## Verificato e non verificato
 
-**Verificato con test automatici (540, copertura 99%):** cifratura e
-manomissioni del vault, permessi e symlink, Keychain reale (roundtrip con un
-item di test), passaggio della password via pipe con un vero processo
-figlio, configurazione risolta da `ssh -G` (OpenSSH 10.3), avvio reale del
-watchdog degli appunti, comando `hsm` reale in una HOME temporanea.
+**Verificato con test automatici (oltre 600, copertura 98%):**
+- cifratura e manomissioni del vault, permessi e symlink;
+- Keychain reale (roundtrip con un item di test);
+- configurazione risolta da `ssh -G` (OpenSSH 10.3);
+- helper `hsm-askpass` installato, lanciato come lo lancia ssh;
+- avvio reale del watchdog degli appunti;
+- comando `hsm` reale in una HOME temporanea.
+
+**Verificato con il vero ssh e `sshd` temporanei su 127.0.0.1**
+(`HSM_SSHD_TESTS=1`):
+- la password del vault arriva al server di destinazione senza intervento;
+- una chiave host sconosciuta non viene accettata;
+- un jump host con lo stesso `utente@host` della destinazione non riceve la
+  password (prova manuale con due sshd).
+
+Un sshd lanciato come utente normale non può verificare le password, quindi
+questi test arrivano fino al "password ricevuta dal server", non a un login
+riuscito.
 
 **Non verificato in automatico, da provare a mano:**
-
 - prompt Touch ID reale (provato da te durante lo sviluppo di `touchid.py`);
 - scrittura e cancellazione degli appunti reali:
   `HSM_CLIPBOARD_TESTS=1 .venv/bin/pytest tests/test_clipboard.py -k real_pasteboard`;
-- `hsm pw set` e `hsm connect` verso un host vero, con e senza sshpass;
+- `hsm add --password` e `hsm connect` verso un host vero, fino al login
+  riuscito, anche con un bastion;
+- server con autenticazione keyboard-interactive (PAM), dove il formato
+  della domanda viene dalla documentazione di OpenSSH e non da una prova;
 - comportamento degli appunti universali con il tipo `Transient`.
