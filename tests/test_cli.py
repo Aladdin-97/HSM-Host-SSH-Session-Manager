@@ -740,3 +740,80 @@ def test_edit_alias_dry_run_changes_nothing(env: Env) -> None:
     env.run("edit", "web01", "--alias", "web02", "--dry-run")
     assert env.paths.hosts.read_text() == before
     assert "+[hosts.web02]" in env.text()
+
+
+# --- add: Hostname/IP e password subito -------------------------------------------
+
+
+def test_add_accepts_ip_as_synonym_of_hostname(env: Env) -> None:
+    assert env.run("add", "web01", "--ip", "10.0.0.1") == 0
+    assert env.inventory().get("web01").hostname == "10.0.0.1"
+
+
+def test_add_interactive_label_mentions_ip(env: Env) -> None:
+    prompts: list[str] = []
+    original = env._ask
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        return original(prompt)
+
+    env._ask = ask  # type: ignore[method-assign]
+    env.answers = ["10.0.0.1", "", "", "", "", "", ""]
+    env.run("add", "web01")
+    assert prompts[0].startswith("Hostname o IP")
+
+
+def test_add_with_password_flag_stores_it_right_away(env: Env) -> None:
+    # password host (due volte), poi master password nuova (due volte)
+    env.secrets = ["host-pw", "host-pw", MASTER, MASTER]
+    assert env.run("add", "legacy01", "--ip", "10.0.0.9", "--user", "admin", "--password") == 0
+    assert env.inventory().get("legacy01").auth == "password"
+    env.secrets = [MASTER]
+    env.run("connect", "legacy01")
+    assert env.connector.calls == [("legacy01", b"host-pw")]
+
+
+def test_add_password_is_never_an_argv_value(env: Env) -> None:
+    # `--password s3cret` finirebbe nella cronologia della shell e in `ps`.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["add", "x", "--ip", "h", "--password", "s3cret"])
+
+
+def test_add_password_mismatch_adds_nothing(env: Env) -> None:
+    env.secrets = ["one", "two"]
+    with pytest.raises(HsmError, match="non coincidono"):
+        env.run("add", "legacy01", "--ip", "10.0.0.9", "--password")
+    assert env.inventory().hosts() == []
+    assert not env.paths.vault.exists()
+
+
+def test_add_password_cancelled_unlock_adds_nothing(env: Env) -> None:
+    _add_web01(env)
+    _vault_with_password(env, "web01", "host-pw")
+    env.secrets = ["pw2", "pw2"]  # poi EOF alla master password
+    with pytest.raises(HsmError):
+        env.run("add", "legacy01", "--ip", "10.0.0.9", "--password")
+    with pytest.raises(HsmError):
+        env.inventory().get("legacy01")
+
+
+def test_add_interactive_offers_password(env: Env) -> None:
+    env.answers = ["10.0.0.9", "admin", "", "", "", "", "", "s"]
+    env.secrets = ["host-pw", "host-pw", MASTER, MASTER]
+    env.run("add", "legacy01")
+    assert env.inventory().get("legacy01").auth == "password"
+
+
+def test_add_interactive_default_is_key(env: Env) -> None:
+    env.answers = ["10.0.0.1", "", "", "", "", "", "", ""]
+    env.run("add", "web01")
+    assert env.inventory().get("web01").auth == "key"
+    assert not env.paths.vault.exists()
+
+
+def test_add_password_dry_run_asks_nothing_and_writes_nothing(env: Env) -> None:
+    assert env.run("add", "legacy01", "--ip", "10.0.0.9", "--password", "--dry-run") == 0
+    assert not env.paths.hosts.exists() and not env.paths.vault.exists()
+    assert '+auth = "password"' in env.text()
+    assert "vault" in env.text()

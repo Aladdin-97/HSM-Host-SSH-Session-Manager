@@ -153,15 +153,46 @@ class App:
             raise HsmError(f"alias non valido: {args.alias!r}")
         Inventory.load(self.paths.hosts).add(Host(alias=args.alias, hostname="placeholder"))
         flags = _host_flags(args)
+        use_password: bool = args.password
         if not flags:
             host = self._ask_host(args.alias, None)
+            if not use_password and not args.dry_run:
+                use_password = self._confirm("Usare una password per questo host (salvata nel vault)?")
         elif "hostname" not in flags:
-            raise HsmError("Manca --hostname (oppure lancia `hsm add <alias>` senza flag).")
+            raise HsmError("Manca --hostname/--ip (oppure lancia `hsm add <alias>` senza flag).")
         else:
             host = Host(alias=args.alias, **flags)
-        self._change_inventory(lambda inv: inv.add(host), dry_run=args.dry_run)
-        if not args.dry_run:
-            self._out(f"Aggiunto {host.alias}.")
+        if use_password:
+            host = dataclasses.replace(host, auth="password")
+
+        if args.dry_run or not use_password:
+            self._change_inventory(lambda inv: inv.add(host), dry_run=args.dry_run)
+            if args.dry_run and use_password:
+                self._out(f"(chiederei la password di {host.alias} e la salverei nel vault)")
+            elif not args.dry_run:
+                self._out(f"Aggiunto {host.alias}.")
+            return 0
+
+        # La password si chiede prima del lock (l'utente può metterci un po');
+        # vault e inventario si aggiornano poi insieme, sotto lock.
+        with self._ask_new_host_password(host.alias) as password:
+            ensure_private_dir(self.paths.config_dir)
+            with locked(self.paths.lock):
+                inv = Inventory.load(self.paths.hosts)
+                # Prima l'inventario in memoria: un alias già usato si scopre
+                # qui, senza aver toccato il vault. Se l'unlock viene annullato
+                # l'host non viene aggiunto.
+                inv.add(host)
+                self._store_password(host.alias, password)
+                try:
+                    inv.save()
+                except (OSError, HsmError) as exc:
+                    raise HsmError(
+                        f"Password di {host.alias} salvata nel vault, ma non ho potuto "
+                        f"aggiornare {self.paths.hosts} ({exc}): rilancia hsm add, oppure "
+                        f"togli la password con hsm pw rm {host.alias}."
+                    ) from None
+        self._out(f"Aggiunto {host.alias}, con la password nel vault.")
         return 0
 
     def edit(self, args: argparse.Namespace) -> int:
@@ -531,9 +562,9 @@ class App:
             if new_alias is None:
                 raise HsmError("Serve un alias.")
             alias = new_alias
-        hostname = ask("Hostname", current.hostname if current else None)
+        hostname = ask("Hostname o IP", current.hostname if current else None)
         if hostname is None:
-            raise HsmError("Serve un hostname.")
+            raise HsmError("Serve un hostname o un indirizzo IP.")
         user = ask("Utente (invio = default di ssh)", current.user if current else None)
         port_text = ask("Porta", str(current.port if current else DEFAULT_PORT))
         try:
@@ -583,7 +614,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def host_fields(p: argparse.ArgumentParser) -> None:
         p.add_argument("alias")
-        p.add_argument("--hostname")
+        p.add_argument("--hostname", "--ip", dest="hostname", metavar="HOST_O_IP", help="nome DNS o indirizzo IP")
         p.add_argument("--user")
         p.add_argument("--port", type=int)
         p.add_argument("--tag", action="append", help="ripetibile")
@@ -592,7 +623,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--note")
         p.add_argument("--dry-run", action="store_true", help="mostra le modifiche senza scriverle")
 
-    host_fields(sub.add_parser("add", help="aggiunge un host"))
+    add = sub.add_parser("add", help="aggiunge un host")
+    host_fields(add)
+    # Un interruttore, mai un valore: `--password s3cret` finirebbe nella
+    # cronologia della shell e negli argomenti visibili con `ps`.
+    add.add_argument(
+        "--password", action="store_true", help="chiede la password (nascosta) e la salva nel vault"
+    )
     edit = sub.add_parser("edit", help="modifica un host")
     host_fields(edit)
     # dest diverso dal positional `alias`: è il NUOVO nome.
