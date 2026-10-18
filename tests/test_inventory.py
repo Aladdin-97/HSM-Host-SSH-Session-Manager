@@ -539,3 +539,136 @@ port = 2222
     text = path.read_text()
     assert "# My servers" in text and "# internal IP" in text
     assert "[hosts.web02]" in text and "web01" not in text
+
+
+# --- folders (group) -----------------------------------------------------------
+
+
+def test_group_defaults_to_none() -> None:
+    assert Host(alias="a", hostname="a").group is None
+
+
+@pytest.mark.parametrize(
+    "raw, normalized",
+    [("prod", "prod"), ("prod/eu/web", "prod/eu/web"), ("/prod/eu/", "prod/eu"), ("", None), ("/", None)],
+)
+def test_group_is_normalized(raw: str, normalized: str | None) -> None:
+    assert web01(group=raw).group == normalized
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "prod//eu",  # empty segment
+        "prod/../eu",  # no relative segments
+        "prod/./eu",
+        "prod eu",  # spaces
+        "prod/-eu",  # leading dash in a segment
+        "prod\neu",
+        "a/" * 17 + "a",  # too deep
+        "x" * 65,  # segment too long
+    ],
+)
+def test_invalid_group(bad: str) -> None:
+    with pytest.raises(InvalidHostError, match="group"):
+        web01(group=bad)
+
+
+def test_group_roundtrip_and_omitted_when_none(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(web01(group="prod/eu/web"))
+    inv.add(Host(alias="lab", hostname="lab"))
+    inv.save()
+    text = path.read_text()
+    assert 'group = "prod/eu/web"' in text
+    assert text.count("group") == 1
+    assert Inventory.load(path).get("web01").group == "prod/eu/web"
+
+
+def test_group_with_wrong_type_in_file(path: Path) -> None:
+    _write(path, '[hosts.web01]\nhostname = "x"\ngroup = ["prod"]\n')
+    with pytest.raises(InventoryError, match="web01.*group"):
+        Inventory.load(path)
+
+
+def test_groups_lists_every_folder_with_its_host_count(path: Path) -> None:
+    inv = Inventory.load(path)
+    inv.add(Host(alias="w1", hostname="w1", group="prod/eu/web"))
+    inv.add(Host(alias="w2", hostname="w2", group="prod/eu/web"))
+    inv.add(Host(alias="d1", hostname="d1", group="prod/eu/db"))
+    inv.add(Host(alias="u1", hostname="u1", group="prod/us"))
+    inv.add(Host(alias="root", hostname="root"))
+    # Counts include sub-folders: prod has everything below it.
+    assert inv.groups() == {
+        "prod": 4,
+        "prod/eu": 3,
+        "prod/eu/db": 1,
+        "prod/eu/web": 2,
+        "prod/us": 1,
+    }
+
+
+# --- moving folders -------------------------------------------------------------
+
+
+def _fleet(path: Path) -> Inventory:
+    inv = Inventory.load(path)
+    inv.add(Host(alias="w1", hostname="w1", group="prod/eu/web"))
+    inv.add(Host(alias="d1", hostname="d1", group="prod/eu"))
+    inv.add(Host(alias="x1", hostname="x1", group="prod/europe-old"))  # prefix, NOT inside prod/eu
+    inv.add(Host(alias="u1", hostname="u1", group="prod/us"))
+    return inv
+
+
+def test_move_group_moves_folder_and_subfolders(path: Path) -> None:
+    inv = _fleet(path)
+    assert inv.move_group("prod/eu", "prod/europe") == ["d1", "w1"]
+    assert inv.get("w1").group == "prod/europe/web"
+    assert inv.get("d1").group == "prod/europe"
+    assert inv.get("x1").group == "prod/europe-old"  # untouched: "prod/eu" is not a prefix of it
+    assert inv.get("u1").group == "prod/us"
+
+
+def test_move_group_to_root(path: Path) -> None:
+    inv = _fleet(path)
+    inv.move_group("prod/eu", "")
+    assert inv.get("d1").group is None
+    assert inv.get("w1").group == "web"
+
+
+def test_move_group_is_saved(path: Path) -> None:
+    inv = _fleet(path)
+    inv.move_group("prod", "archive/prod")
+    inv.save()
+    assert Inventory.load(path).get("u1").group == "archive/prod/us"
+
+
+def test_move_unknown_group_is_an_error(path: Path) -> None:
+    with pytest.raises(InventoryError, match="nope"):
+        _fleet(path).move_group("nope", "x")
+
+
+def test_move_group_into_itself_is_rejected(path: Path) -> None:
+    with pytest.raises(InventoryError, match="inside"):
+        _fleet(path).move_group("prod", "prod/eu/archive")
+
+
+def test_move_group_to_invalid_name_changes_nothing(path: Path) -> None:
+    inv = _fleet(path)
+    with pytest.raises(InvalidHostError, match="group"):
+        inv.move_group("prod/eu", "bad name")
+    assert inv.get("w1").group == "prod/eu/web"
+
+
+def test_move_group_edge_cases(path: Path) -> None:
+    inv = _fleet(path)
+    with pytest.raises(InventoryError, match="root"):
+        inv.move_group("", "x")
+    assert inv.move_group("prod/eu", "/prod/eu/") == []  # same folder: nothing to do
+    with pytest.raises(InvalidHostError, match="'bad name'"):
+        inv.move_group("bad name", "x")  # the message names the invalid one
+
+
+def test_group_must_be_a_string() -> None:
+    with pytest.raises(InvalidHostError, match="group"):
+        web01(group=["prod"])  # type: ignore[arg-type]

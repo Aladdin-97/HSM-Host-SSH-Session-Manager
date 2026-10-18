@@ -63,6 +63,12 @@ _ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 _DNS_LABEL_RE = re.compile(r"[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?")
 _USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _TAG_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,31}")
+# A folder is a path of segments like "prod/eu/web". Each segment follows
+# almost the alias rules: no leading "-", so "." and ".." are impossible too,
+# and no spaces or other characters that would need quoting in a shell or in
+# fzf. The depth limit only guards against absurd values.
+_GROUP_SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
+MAX_GROUP_DEPTH = 16
 _PORT_RE = re.compile(r"[0-9]{1,5}")
 # IPv6 zone (an interface name, e.g. en0). ipaddress accepts any;
 # we only accept characters that ssh_config reads without surprises.
@@ -99,6 +105,7 @@ class Host:
     user: str | None = None
     port: int = DEFAULT_PORT
     tags: tuple[str, ...] = ()
+    group: str | None = None
     jump_host: str | None = None
     identity_file: str | None = None
     note: str | None = None
@@ -149,6 +156,10 @@ class Host:
         if self.note is not None and (not isinstance(self.note, str) or not self.note.isprintable()):
             # isprintable() rules out newlines and terminal escape sequences.
             self._fail("note", self.note)
+        try:
+            object.__setattr__(self, "group", normalize_group(self.group))
+        except ValueError:
+            self._fail("group", self.group)
         if self.auth not in AUTH_METHODS:
             self._fail("auth", self.auth)
 
@@ -223,6 +234,7 @@ _FILE_TYPES: dict[str, tuple[type, str]] = {
     "identity_file": (str, "a string"),
     "note": (str, "a string"),
     "auth": (str, '"key" or "password"'),
+    "group": (str, 'a folder path like "prod/eu"'),
 }
 
 
@@ -342,6 +354,51 @@ class Inventory:
         del self._hosts[alias]
         return host
 
+    def groups(self) -> dict[str, int]:
+        """Every folder, with how many hosts it contains (sub-folders included).
+
+        A host in "prod/eu/web" counts for "prod", "prod/eu" and "prod/eu/web":
+        that is what a tree view shows next to each folder.
+        """
+        counts: dict[str, int] = {}
+        for host in self._hosts.values():
+            if host.group is None:
+                continue
+            parts = host.group.split("/")
+            for depth in range(1, len(parts) + 1):
+                prefix = "/".join(parts[:depth])
+                counts[prefix] = counts.get(prefix, 0) + 1
+        return dict(sorted(counts.items()))
+
+    def move_group(self, old: str, new: str) -> list[str]:
+        """Move a folder (and its sub-folders) under a new path; "" means the root.
+
+        Returns the aliases of the moved hosts. Every new Host is built (and
+        so validated) before anything changes: an invalid target leaves the
+        inventory untouched instead of half-moved.
+        """
+        source = _group_or_error(old)
+        target = _group_or_error(new)
+        if source is None:
+            raise InventoryError("Cannot move the root: name a folder.")
+        if target == source:
+            return []
+        if target is not None and target.startswith(source + "/"):
+            raise InventoryError(f"Cannot move {source!r} inside itself ({target!r}).")
+        moved: list[Host] = []
+        for host in self._hosts.values():
+            # Exact folder or a real sub-folder: "prod/eu" must not catch "prod/europe".
+            if host.group != source and not (host.group or "").startswith(source + "/"):
+                continue
+            rest = host.group[len(source) :].lstrip("/") if host.group else ""
+            new_group = "/".join(part for part in (target, rest) if part) or None
+            moved.append(dataclasses.replace(host, group=new_group))
+        if not moved:
+            raise InventoryError(f"No folder {old!r}.")
+        for host in moved:
+            self.update(host)
+        return sorted(h.alias for h in moved)
+
     def referenced_by(self, alias: str) -> list[str]:
         """Aliases of the hosts that use `alias` as jump_host."""
         return sorted(h.alias for h in self._hosts.values() if h.jump_host == alias)
@@ -356,6 +413,31 @@ class Inventory:
             ensure_private_dir(self._path.parent)
             atomic_write(self._path, text.encode("utf-8"))
         return text
+
+
+def _group_or_error(value: str) -> str | None:
+    try:
+        return normalize_group(value)
+    except ValueError:
+        raise InvalidHostError(f"invalid group: {value!r}") from None
+
+
+def normalize_group(value: object) -> str | None:
+    """A folder path in canonical form: no surrounding "/", None for the root.
+
+    Raises ValueError if the value is not a valid path.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("group must be a string")
+    path = value.strip("/")
+    if not path:
+        return None
+    parts = path.split("/")
+    if len(parts) > MAX_GROUP_DEPTH or not all(_GROUP_SEGMENT_RE.fullmatch(p) for p in parts):
+        raise ValueError(f"invalid group: {value!r}")
+    return path
 
 
 def _check_conflicts(host: Host, hosts: dict[str, Host], *, replacing: str | None) -> None:
@@ -409,6 +491,7 @@ def _to_file(host: Host) -> dict[str, Any]:
         "hostname": host.hostname,
         "user": host.user,
         "port": host.port if host.port != DEFAULT_PORT else None,
+        "group": host.group,
         "tags": list(host.tags) if host.tags else None,
         "jump_host": host.jump_host,
         "identity_file": host.identity_file,
