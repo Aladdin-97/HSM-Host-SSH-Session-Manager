@@ -4,8 +4,9 @@ A CLI to manage an inventory of SSH hosts on macOS, built to replace
 MobaXterm's session tree.
 
 - **Saves hosts** in a readable, versionable TOML file, with no secrets.
-- **Organizes them** with tags and searches them, including with an
-  interactive picker.
+- **Organizes them** in folders (`prod/eu/web`) and with tags, and finds
+  them with a small search syntax, including from an interactive picker
+  that browses folders like k9s.
 - **Stores passwords** in an encrypted vault (AES-256-GCM, key from
   Argon2id), unlocked with Touch ID.
 - **Connects** with the system's native `ssh` (`/usr/bin/ssh`). For
@@ -28,6 +29,9 @@ hosts that leave no choice.
 - [Installation](#installation)
 - [Getting started](#getting-started)
 - [Commands](#commands)
+- [Folders](#folders)
+- [Search](#search)
+- [Picker](#picker)
 - [The hosts.toml file](#the-hoststoml-file)
 - [Passwords and vault](#passwords-and-vault)
 - [Connection](#connection)
@@ -48,7 +52,7 @@ hosts that leave no choice.
 | Python 3.12+ | yes | `uv` downloads it if missing |
 | [uv](https://docs.astral.sh/uv/) | recommended | For installing and for development |
 | `/usr/bin/ssh` (OpenSSH ≥ 8.4) | yes | Already on macOS. 8.4 is needed for `SSH_ASKPASS_REQUIRE` |
-| `fzf` | optional | For the fuzzy picker. Without it, there is a numbered list |
+| `fzf` | strongly recommended | For the full-screen picker. Without it, there is a numbered list, fine for a few dozen hosts |
 
 **`sshpass` is not needed.** For password hosts, ssh asks for the password
 from a small hsm helper (`hsm-askpass`), which is installed together with
@@ -117,10 +121,11 @@ hsm paths
 ### Bash completion
 
 `hsm completion bash` prints a completion script. It completes commands,
-nested actions (`pw get`, `vault rekey`), the options of the command you are
-typing, your **host aliases** where one is expected (`connect`, `edit`, `rm`,
-`pw …`, `--jump`), your **tags** for `--tag`, files for `--identity`, and the
-values of `--sort`.
+nested actions (`pw get`, `vault rekey`, `group mv`), the options of the
+command you are typing, your **host aliases** where one is expected
+(`connect`, `edit`, `rm`, `show`, `pw …`, `--jump`), your **folders** for
+`--group`, `hsm ls <folder>` and both arguments of `hsm group mv`, your
+**tags** for `--tag`, files for `--identity`, and the values of `--sort`.
 
 ```text
 hsm con<TAB>          →  hsm connect
@@ -128,6 +133,7 @@ hsm connect we<TAB>   →  web01  web02
 hsm pw <TAB>          →  get  rm  set
 hsm add web03 --<TAB> →  --dry-run --hostname --identity --ip --jump --note --password …
 hsm ls --tag p<TAB>   →  hsm ls --tag prod
+hsm ls prod/<TAB>     →  prod/eu  prod/eu/db  prod/eu/web
 ```
 
 With [bash-completion](https://github.com/scop/bash-completion) installed
@@ -150,11 +156,11 @@ eval "$(hsm completion bash)"
 ```
 
 Commands and options are written into the script when you generate it:
-regenerate it after updating hsm. Aliases and tags are always current,
-because they are read from `hosts.toml` at TAB time by a hidden helper
-(`hsm __complete aliases|tags`). The helper reads nothing else, prints
-nothing on errors, and still refuses a `hosts.toml` with the wrong
-permissions. The script works with macOS's `/bin/bash` 3.2 and with bash 5.
+regenerate it after updating hsm. Aliases, folders and tags are always
+current, because they are read from `hosts.toml` at TAB time by a hidden
+helper (`hsm __complete aliases|groups|tags`). The helper reads nothing
+else, prints nothing on errors, and still refuses a `hosts.toml` with the
+wrong permissions. The script works with macOS's `/bin/bash` 3.2 and with bash 5.
 
 ---
 
@@ -163,15 +169,17 @@ permissions. The script works with macOS's `/bin/bash` 3.2 and with bash 5.
 ```bash
 # 1. Add a bastion and a host reached through it
 hsm add bastion --ip bastion.example.com --user jump --port 2200
-hsm add web01 --ip 10.0.0.1 --user deploy --tag prod --tag web --jump bastion
+hsm add web01 --ip 10.0.0.1 --user deploy --tag prod --tag web --jump bastion \
+    --group prod/eu/web
 
-# 2. Look at the inventory
+# 2. Look at the inventory, as a table or as a folder tree
 hsm ls
+hsm ls --tree
 
 # 3. Connect (SSH key: no hsm prompt)
 hsm connect web01
 
-# 4. Or choose from the picker and press Enter
+# 4. Or browse the picker and press Enter
 hsm
 
 # 5. Make `ssh web01` work from any terminal too
@@ -197,6 +205,7 @@ $ hsm add db
 Hostname or IP: db.example.com
 User (Enter = ssh default): postgres
 Port [22]:
+Folder (e.g. prod/eu): prod/eu/db
 Tags (space-separated): prod db
 Jump host:
 SSH key (identity_file): ~/.ssh/id_db
@@ -211,10 +220,14 @@ Added db.
 
 | Command | What it does |
 |---|---|
-| `hsm` | Interactive picker; Enter = connect |
+| `hsm` | Interactive picker, folder by folder; Enter = connect (see [Picker](#picker)) |
+| `hsm -q "QUERY"` | Picker already filtered by a search, e.g. `hsm -q "group:prod/eu web"` |
 | `hsm add <alias> [flags]` | Adds a host, with flags or with questions |
 | `hsm edit <alias> [flags]` | Edits a host, including its alias |
-| `hsm ls [--tag X] [--sort alias\|tag\|recent]` | Lists the hosts |
+| `hsm ls [QUERY] [--tag X] [--sort alias\|tag\|recent]` | Lists the hosts; `QUERY` is a [search](#search) or a folder path |
+| `hsm ls [QUERY] --tree [--depth N] [--hosts]` | The folder tree, with host counts |
+| `hsm show <alias>` | Details of one host; never opens the vault, never shows secrets |
+| `hsm group mv <folder> <target>` | Moves a folder and its sub-folders (`/` = root) |
 | `hsm rm <alias> [--force]` | Removes a host (and its password, if it has one) |
 | `hsm connect <alias>` | Opens the ssh session |
 | `hsm pw set <alias>` | Stores the host's password in the vault |
@@ -229,7 +242,7 @@ Added db.
 - `--debug`: on error, shows the full traceback, which never contains local
   variables.
 
-**`--dry-run`** (on `add`, `edit`, `rm`, `sync`)
+**`--dry-run`** (on `add`, `edit`, `rm`, `group mv`, `sync`)
 - Shows the diff of what would change and writes nothing. It does not even
   ask for passwords.
 
@@ -244,6 +257,7 @@ Added db.
 | `--jump` | `jump_host` | add, edit |
 | `--identity` | `identity_file` | add, edit |
 | `--note` | `note` | add, edit |
+| `--group` | `group`: folder, e.g. `--group prod/eu` (`/` = root) | add, edit |
 | `--password` | asks for the password (hidden) and stores it in the vault | add only |
 | `--alias NEW` | renames the host | edit only |
 
@@ -276,23 +290,36 @@ renamed table moves to the end; the comments inside it are kept.
 **`hsm ls` sorting**
 - `alias` (default), `tag` (by first tag, hosts without tags last),
   `recent` (most recently used first).
+- With a `QUERY` and no `--sort`, the [search ranking](#search) is kept:
+  the best match comes first.
 
 ```text
 $ hsm ls --sort recent
-ALIAS     HOST                           TAG         AUTH      LAST USED
-web01     deploy@10.0.0.1                #prod #web  key       2026-10-16 14:02
-legacy01  admin@10.0.0.9                 -           password  2026-10-15 09:30
-bastion   jump@bastion.example.com:2200  -           key       never
+ALIAS     HOST                           FOLDER       TAG         AUTH      LAST USED
+web01     deploy@10.0.0.1                prod/eu/web  #prod #web  key       2026-10-16 14:02
+legacy01  admin@10.0.0.9                 -            -           password  2026-10-15 09:30
+bastion   jump@bastion.example.com:2200  -            -           key       never
 ```
 
-**Picker (`hsm` without arguments)**
-- **With fzf:** fuzzy filter, Enter to choose, Esc to quit.
-- **Without fzf:** numbered list. Type a number to choose, or some text to
-  filter (it searches alias, host, tags and notes).
-  - The filter chooses on its own only if the text is **exactly an alias**;
-    otherwise you need the number, so a typo does not connect you to some
-    random host.
-  - A filter made only of digits is always read as a line number.
+**`hsm show`**
+
+```text
+$ hsm show web01
+alias      web01
+hostname   10.1.0.1
+user       deploy
+port       22
+folder     prod/eu/web
+tags       #nginx
+jump host  -
+identity   -
+auth       key
+note       -
+last used  never
+```
+
+It only reads `hosts.toml` and `state.toml`: no Touch ID, no vault. For
+`auth = "password"` it says so, nothing more.
 
 **`hsm rm` of a host used as a jump**
 - If the host is the `jump_host` of other hosts, `--force` is required.
@@ -325,6 +352,165 @@ Python             ~/.local/share/uv/tools/hsm/bin/python       runs hsm and the
 
 ---
 
+## Folders
+
+A host can live in a folder, written as a path in the `group` field:
+
+```bash
+hsm add web01 --ip 10.1.0.1 --user deploy --tag nginx --group prod/eu/web
+hsm edit web01 --group prod/eu/front   # move one host
+hsm edit web01 --group /               # back to the root (no folder)
+```
+
+In interactive mode the question is `Folder (e.g. prod/eu)`, right after
+`Port`; answer `-` to put the host back at the root.
+
+- **Paths are normalized:** `/prod/eu/web/` becomes `prod/eu/web`, and `/`
+  alone means the root. A host at the root has no `group` in `hosts.toml`.
+- **Segments follow almost the alias rules:** letters, digits, `.`, `_`,
+  `-`; they start with a letter, a digit or `_`; max 64 characters each
+  and 16 levels.
+- **A folder exists as long as a host is in it:** there are no empty
+  folders to create or delete.
+
+**The tree**
+
+```text
+$ hsm ls --tree
+prod/         5
+├── eu/       4
+│   ├── db/   1
+│   └── web/  2
+└── us/       1
+(no folder)   1
+```
+
+- Every folder shows how many hosts it contains, **sub-folders included**,
+  so a closed folder still tells you how big it is.
+- `--depth N` opens only N levels; deeper folders stay closed but counted.
+- `--hosts` also lists the hosts as leaves.
+- With a search, the tree shows the matching hosts as leaves: it answers
+  "where are they?".
+
+```text
+$ hsm ls --tree web0
+prod/         2
+└── eu/       2
+    └── web/  2
+        ├── web01
+        └── web02
+```
+
+**One folder only**
+
+`hsm ls prod/eu` lists the hosts in `prod/eu` and below: a bare path of an
+existing folder is the same as the search `group:prod/eu`. It works with
+`--tree` too.
+
+**Moving a folder**
+
+```text
+$ hsm group mv prod/us prod/america
+Moved 1 host(s) from prod/us to prod/america.
+Run hsm sync to update the folder sections in ~/.ssh/config.
+```
+
+- Sub-folders move too: `prod/us/web` becomes `prod/america/web`.
+- The match is **per segment**: `hsm group mv prod/eu …` never touches
+  `prod/europe`.
+- `/` as the target moves the hosts to the root; a folder cannot be moved
+  inside itself.
+- It runs under the lock, and `--dry-run` shows the diff of `hosts.toml`.
+
+---
+
+## Search
+
+`hsm ls QUERY`, `hsm -q QUERY` and the picker without fzf share the same
+syntax. Words are separated by spaces; quotes group a phrase.
+
+| Syntax | Matches |
+|---|---|
+| `prod web 03` | every word must appear somewhere: alias, hostname, user, folder, tags, note or jump host (case-insensitive) |
+| `tag:nginx` | exactly this tag |
+| `group:prod/eu` | this folder or below it (per segment: not `prod/europe`) |
+| `group:/` | at the root (no folder) |
+| `user:admin` | exactly this user |
+| `auth:password` | authentication method, `key` or `password` |
+| `host:10.1.` | substring of the hostname |
+| `alias:web` | substring of the alias |
+| `jump:bastion` | substring of the jump host |
+| `-tag:legacy`, `-test` | a leading `-` excludes |
+| `"main frontend"` | a phrase, e.g. from a note |
+
+```text
+$ hsm ls "tag:nginx"
+ALIAS  HOST             FOLDER       TAG     AUTH  LAST USED
+web01  deploy@10.1.0.1  prod/eu/web  #nginx  key   never
+web02  deploy@10.1.0.2  prod/eu/web  #nginx  key   never
+```
+
+- **A prefix is a filter only if it is one of the names above:** `fe80::1`
+  stays a free-text search for an IPv6 address.
+- **Ranking:** an alias equal to a searched word first, then aliases
+  starting with it, then aliases containing it; within each tier the most
+  recently used first, then alphabetical. With hundreds of hosts the one
+  you want is usually at the top after a word or two.
+- **It is fast:** about 1–2 ms on 2000 hosts.
+
+---
+
+## Picker
+
+`hsm` without arguments opens a picker that browses folders like k9s. With
+many hosts, install fzf (`brew install fzf`): the numbered list works, but
+fzf is much more comfortable.
+
+**With fzf: one full-screen fzf per folder**
+- The header says where you are and how many hosts are below:
+  `hsm › <folder>  ·  N hosts`, followed by the key help.
+- The screen lists the **sub-folders**, with their host count, then
+  **every host below** the current folder, with its relative path
+  (`web/web03`). Typing therefore searches the whole sub-tree, while Enter
+  on a folder narrows it.
+- The right pane previews the highlighted line: a host's details (as in
+  `hsm show`) or a folder's tree. It comes from a hidden helper,
+  `hsm __preview`.
+
+| Key | What it does |
+|---|---|
+| Enter | opens the folder, or connects to the host. With no match it stays on the screen |
+| Backspace on an empty query | goes up one folder (not at the root) |
+| ctrl-e | edits the host, with the questions of `hsm edit` |
+| ctrl-y | copies the host's password, like `hsm pw get` |
+| Esc | quits |
+
+**Without fzf: a numbered list per folder**
+- It shows the sub-folders and the hosts directly in the folder. A number
+  opens a folder or picks a host, `..` goes up, Enter on an empty line
+  quits.
+- **Any other text is a search** (the full [syntax](#search)) in the
+  current folder and below, showing at most 30 rows.
+- The search picks on its own only if the text is **exactly an alias**;
+  otherwise you need the number, so a typo does not connect you to some
+  random host.
+- A number beyond the rows on screen is searched instead, so an alias
+  like `2024` stays reachable.
+
+**Starting from a search: `hsm -q`**
+
+```bash
+hsm -q "group:prod/eu web -test"
+```
+
+- **Field filters** (`tag:`, `group:`, `user:`…) narrow the hosts before
+  the picker opens.
+- **Free words** become fzf's initial query, which you can still edit;
+  `-test` is translated to fzf's `!test`.
+- With **exactly one** `group:` filter, the picker opens in that folder.
+
+---
+
 ## The hosts.toml file
 
 It lives in `~/.config/hsm/hosts.toml`. One table per host:
@@ -336,6 +522,7 @@ It lives in `~/.config/hsm/hosts.toml`. One table per host:
 hostname = "10.0.0.1"
 user = "deploy"
 port = 2222                      # omitted if 22
+group = "prod/eu/web"            # folder; omitted at the root
 tags = ["prod", "web"]
 jump_host = "bastion"            # hsm alias, or [user@]host[:port]
 identity_file = "~/.ssh/id_ed25519"
@@ -353,6 +540,7 @@ auth = "password"                # set by `hsm add --password` / `hsm pw set`
 | `hostname` | yes | DNS name or IP address (IPv4, IPv6, also with a zone such as `fe80::1%en0`). Never a leading `-` |
 | `user` | no | Letters, digits, `.`, `_`, `-`; no `@` |
 | `port` | no | 1–65535, default 22 |
+| `group` | no | Folder path, e.g. `"prod/eu/web"`. Segments: letters, digits, `.`, `_`, `-`, max 64 characters, max 16 levels. Leading and trailing `/` are dropped; absent = root |
 | `tags` | no | List of words: letters, digits, `_`, `-` |
 | `jump_host` | no | An inventory alias or `[user@]host[:port]`, with IPv6 in `[ ]`. **Never `none`**: to ssh it would mean "no bastion" |
 | `identity_file` | no | Absolute or starting with `~`. Spaces allowed; `"`, `\`, `%` and `$`, which ssh_config would expand, are forbidden |
@@ -516,6 +704,7 @@ It writes only between two markers:
 # >>> hsm begin
 # Generated by `hsm sync`: changes inside this block will be overwritten.
 
+# --- prod/eu/web ---
 Host web01
     HostName 10.0.0.1
     User deploy
@@ -531,6 +720,9 @@ Host *
 
 **The rules**
 - **Everything outside the markers stays identical, byte for byte.**
+- **Hosts are sorted by folder, then alias**, with a `# --- <folder> ---`
+  comment before each folder (`# --- (no folder) ---` for the root). If no
+  host has a folder, there are no section comments.
 - **If the markers are missing, the block goes at the top of the file.** In
   ssh_config the first value found wins, so at the top hsm's values are not
   overridden by a `Host *` written further down.
@@ -547,8 +739,8 @@ Host *
 - **hsm does not touch the file in three cases:** malformed markers (only
   one, swapped, duplicated), file modified by an editor during the sync,
   file that is not UTF-8 text. In all three it tells you what to fix.
-- **After a rename** (`hsm edit --alias`) the block still has the old name
-  until you run `hsm sync` again.
+- **After a rename** (`hsm edit --alias`) or a `hsm group mv` the block is
+  out of date until you run `hsm sync` again.
 
 The password never goes into the block: `ssh <alias>` from a normal
 terminal asks you for it. The automatic password exists only with
@@ -733,11 +925,13 @@ src/hsm/
 ├── unlock.py      Touch ID + Keychain, or master password
 ├── inventory.py   hosts.toml: Host model, validation, rename
 ├── state.py       state.toml: last use per host
+├── search.py      search syntax (words, tag:, group:…) and ranking
+├── tree.py        folder tree for hsm ls --tree and the preview
 ├── sshconfig.py   block between the markers in ~/.ssh/config
 ├── askpass.py     password for ssh via SSH_ASKPASS (server + hsm-askpass helper)
 ├── connect.py     ssh arguments, ProxyJump, session with askpass
 ├── clipboard.py   clipboard with automatic clearing (hsm pw get)
-├── picker.py      picker: fzf or numbered list
+├── picker.py      picker by folder: full-screen fzf or numbered list
 ├── completion.py  bash completion script, generated from the argparse parser
 └── cli.py         command line: wires the modules together
 ```

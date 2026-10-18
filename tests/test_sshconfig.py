@@ -336,3 +336,32 @@ def test_identity_file_comes_with_identities_only() -> None:
     # Without it, ssh first tries all the agent's keys and the server may
     # disconnect with "Too many authentication failures" before reaching -i.
     assert '    IdentityFile "~/.ssh/id_ed25519"\n    IdentitiesOnly yes\n' in render([WEB01])
+
+
+# --- per-folder sections ----------------------------------------------------------
+
+
+def test_render_groups_hosts_by_folder_with_section_comments() -> None:
+    hosts = [
+        Host(alias="web02", hostname="10.0.0.2", group="prod/eu/web"),
+        Host(alias="laptop", hostname="laptop.lan"),
+        Host(alias="db01", hostname="10.0.0.3", group="prod/eu/db"),
+        Host(alias="web01", hostname="10.0.0.1", group="prod/eu/web"),
+    ]
+    lines = render(hosts).splitlines()
+    headers = [line for line in lines if line.startswith("# --- ")]
+    assert headers == ["# --- (no folder) ---", "# --- prod/eu/db ---", "# --- prod/eu/web ---"]
+    order = [line.split()[1] for line in lines if line.startswith("Host ") and line != "Host *"]
+    assert order == ["laptop", "db01", "web01", "web02"]
+
+
+def test_render_without_folders_has_no_section_comments() -> None:
+    assert "# --- " not in render([WEB01, BASTION])
+
+
+@needs_ssh
+def test_ssh_still_reads_a_sectioned_block(cfg: Path) -> None:
+    hosts = [Host(alias="a", hostname="10.0.0.1", group="x/y"), Host(alias="b", hostname="10.0.0.2")]
+    apply(cfg, render(hosts), now=NOW)
+    assert _ssh_g(cfg, "a")["hostname"] == "10.0.0.1"
+    assert _ssh_g(cfg, "b")["hostname"] == "10.0.0.2"

@@ -50,9 +50,9 @@ def home(tmp_path: Path) -> Path:
     home.mkdir(mode=0o700)
     env = {**os.environ, "HOME": str(home)}
     for args in (
-        ["add", "bastion", "--ip", "b.example.com", "--tag", "infra"],
-        ["add", "web01", "--ip", "10.0.0.1", "--tag", "prod", "--tag", "web"],
-        ["add", "web02", "--ip", "10.0.0.2", "--tag", "prod"],
+        ["add", "bastion", "--ip", "b.example.com", "--tag", "infra", "--group", "prod"],
+        ["add", "web01", "--ip", "10.0.0.1", "--tag", "prod", "--tag", "web", "--group", "prod/eu/web"],
+        ["add", "web02", "--ip", "10.0.0.2", "--tag", "prod", "--group", "prod/eu/web"],
     ):
         subprocess.run([str(HSM), *args], env=env, check=True, capture_output=True)
     return home
@@ -147,3 +147,18 @@ def test_completion_command_prints_the_script(home: Path) -> None:
         check=True,
     ).stdout
     assert out == bash_script(build_parser())
+
+
+def test_completes_folders(bash: str, home: Path) -> None:
+    assert complete(bash, home, "hsm edit web01 --group prod/e") == ["prod/eu", "prod/eu/web"]
+    assert complete(bash, home, "hsm ls prod/eu") == ["prod/eu", "prod/eu/web"]
+    assert complete(bash, home, "hsm group ") == ["mv"]
+    assert complete(bash, home, "hsm group mv p") == ["prod", "prod/eu", "prod/eu/web"]
+    assert complete(bash, home, "hsm group mv prod/eu prod/eu/") == ["prod/eu/web"]
+
+
+def test_show_completes_aliases_and_hidden_helpers_stay_hidden(bash: str, home: Path) -> None:
+    assert complete(bash, home, "hsm show web") == ["web01", "web02"]
+    commands = complete(bash, home, "hsm ")
+    assert "__preview" not in commands and "__complete" not in commands
+    assert {"group", "show"} <= set(commands)

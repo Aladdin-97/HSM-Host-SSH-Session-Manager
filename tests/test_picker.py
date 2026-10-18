@@ -358,3 +358,31 @@ def test_invalid_start_folder_is_an_error() -> None:
 def test_list_numeric_alias_out_of_range_is_searched() -> None:
     hosts = [*HOSTS, Host(alias="2024", hostname="10.9.9.9")]
     assert list_picker(Console(answers=["2024"])).browse(hosts) == Selection("connect", hosts[-1])
+
+
+# --- initial query from the CLI (search syntax) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "query, fzf_query",
+    [("web", "web"), ("web -db", "web !db"), ('"main frontend"', "main\\ frontend")],
+)
+def test_query_is_translated_to_fzf_syntax(query: str, fzf_query: str) -> None:
+    fake = FakeFzf()
+    fzf_picker(fake).browse(HOSTS, query=query)
+    assert f"--query={fzf_query}" in fake.calls[0][0]
+
+
+def test_list_starts_from_the_search_results() -> None:
+    console = Console(answers=["1"])
+    assert list_picker(console).browse(HOSTS, query="web") == Selection("connect", WEB01)
+    assert "hsm › /" not in console.printed[0]  # straight to the results
+
+
+def test_unparsable_initial_query_is_harmless() -> None:
+    fake = FakeFzf()
+    fzf_picker(fake).browse(HOSTS, query='"open')
+    assert '--query="open' in fake.calls[0][0]
+    console = Console(answers=["laptop"])
+    assert list_picker(console).browse(HOSTS, query='"open') == Selection("connect", LAPTOP)
+    assert "quotes" in console.text()

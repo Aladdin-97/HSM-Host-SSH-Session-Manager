@@ -19,7 +19,7 @@ unlocked Mac.
 | Host passwords | `~/.config/hsm/vault.enc`, encrypted | High |
 | Vault key (32 bytes, derived from the master password) | login keychain, item `hsm` | High: opens the vault without the master password |
 | Master password | only in your head; in memory for a moment during unlock | High |
-| Inventory (hostnames, users, bastions, tags, notes) | `~/.config/hsm/hosts.toml`, in clear | Medium: it is a map of your infrastructure |
+| Inventory (hostnames, users, bastions, folders, tags, notes) | `~/.config/hsm/hosts.toml`, in clear | Medium: it is a map of your infrastructure |
 | Hosts' last use | `~/.config/hsm/state.toml`, in clear | Low: tells what you use and when |
 | Generated block | `~/.ssh/config` between the markers, plus the `config.hsm-backup-*` backups | Medium, like the inventory |
 
@@ -75,6 +75,11 @@ For example a file shared in a team repository, or modified by a script.
 - **`jump_host = "none"` is forbidden:** it would silently skip the bastion.
 - **Aliases:** unique case-insensitively, and never equal to another host's
   hostname. `Host 10.0.0.1` would hijack anyone typing `ssh 10.0.0.1`.
+- **Folders and notes** are validated too: folder segments use only
+  letters, digits, `.`, `_`, `-`, and notes have no control characters.
+  What `hsm ls`, `hsm show` and the picker print cannot carry terminal
+  escape sequences, and the `# --- <folder> ---` comments in
+  `~/.ssh/config` cannot break a line.
 - **Limit:** hsm checks the *shape* of values, not *trust*. If the file
   says `prod-db` is `attacker.example.com`, hsm connects you there, and with
   `auth = "password"` sends the password there. A shared `hosts.toml` must
@@ -246,6 +251,26 @@ they are the default, and the password is the secondary case.
   the clipboard until logout. The deadline is on wall-clock time, so it
   survives the Mac sleeping.
 
+### Picker and fzf
+
+- **fzf receives no secrets:** only the lines of the current screen
+  (folders, aliases, `user@host`, tags, notes). It is looked up in the
+  `PATH`, and used only if that path is absolute.
+- **The preview runs through your shell.** fzf runs
+  `hsm __preview {1} {2}` with the shell to fill the right pane. fzf
+  quotes the placeholders, the ids it puts there are validated aliases and
+  folders (only `[A-Za-z0-9._/-]`), and the path of `hsm` is shell-quoted.
+  The helper only reads `hosts.toml` and `state.toml`, never the vault.
+- **fzf's output is parsed strictly.** A known key, exactly one line, and a
+  folder or host that is on the current screen; anything else is an error,
+  never a connection to some other host.
+- **`FZF_DEFAULT_OPTS` and `FZF_DEFAULT_OPTS_FILE` are dropped** from fzf's
+  environment: options from there could change fzf's keys or the format
+  of what it prints.
+- **ctrl-y and ctrl-e** go through the same paths as `hsm pw get` and
+  `hsm edit`: Touch ID or master password for the first, nothing secret
+  for the second.
+
 ### Plaintext files
 
 - **`hosts.toml`, the block in `~/.ssh/config` and its backups are a map of
@@ -283,13 +308,16 @@ they are the default, and the password is the secondary case.
 
 ## Verified and not verified
 
-**Verified with automated tests (over 600, 98% coverage):**
+**Verified with automated tests (about 750, 98% coverage):**
 - vault encryption and tampering, permissions and symlinks;
 - real Keychain (roundtrip with a test item);
 - configuration resolved by `ssh -G` (OpenSSH 10.3);
 - installed `hsm-askpass` helper, launched the way ssh launches it;
 - real start of the clipboard watchdog;
 - real `hsm` command in a temporary HOME.
+
+**Verified with the real fzf** (0.74.5, driven in a pty): the picker
+end to end.
 
 **Verified with the real ssh and temporary `sshd` on 127.0.0.1**
 (`HSM_SSHD_TESTS=1`):

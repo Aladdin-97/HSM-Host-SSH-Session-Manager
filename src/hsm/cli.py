@@ -30,6 +30,7 @@ import getpass
 import os
 import re
 import resource
+import shlex
 import shutil
 import stat
 import sys
@@ -43,12 +44,14 @@ from hsm.completion import bash_script
 from hsm.connect import SSH, Connector, default_askpass_helper
 from hsm.errors import HsmError, InsecurePermissionsError, make_excepthook
 from hsm.fsutil import check_private, ensure_private_dir, locked
-from hsm.inventory import DEFAULT_PORT, Host, Inventory, is_valid_alias
+from hsm.inventory import DEFAULT_PORT, Host, Inventory, is_valid_alias, normalize_group
 from hsm.picker import Picker, format_line
+from hsm.search import Query, SearchError, matches, parse, search
 from hsm.secret import Secret
 from hsm.keychain import Keychain, KeychainError
 from hsm.sshconfig import BEGIN, apply, render
 from hsm.state import State
+from hsm.tree import render_tree
 from hsm.unlock import Unlocker
 from hsm.vault import VaultEntry
 
@@ -110,7 +113,7 @@ class App:
         self._unlocker_factory = unlocker_factory
         self._clipboard = clipboard if clipboard is not None else Clipboard()
         self._connector = connector or Connector(warn=warn)
-        self._picker = picker if picker is not None else Picker()
+        self._picker = picker if picker is not None else Picker(preview=preview_command(_hsm_executable()))
         self._ask_raw = ask
         self._ask_secret_raw = ask_secret
         self._out = out
@@ -131,11 +134,17 @@ class App:
         """Run the parsed command; return the exit code."""
         match args.command:
             case None:
-                return self.pick()
+                return self.pick(args.query)
             case "add":
                 return self.add(args)
             case "ls":
-                return self.ls(args.tag, args.sort)
+                return self.ls(args.query, tag=args.tag, sort=args.sort, tree=args.tree, depth=args.depth, show_hosts=args.hosts)
+            case "group":
+                return self.group_mv(args.folder, args.target, dry_run=args.dry_run)
+            case "show":
+                return self.show(args.alias)
+            case "__preview":
+                return self.preview(args.kind, args.id)
             case "rm":
                 return self.rm(args.alias, force=args.force, dry_run=args.dry_run)
             case "edit":
@@ -210,9 +219,9 @@ class App:
         return 0
 
     def edit(self, args: argparse.Namespace) -> int:
-        alias = args.alias
-        flags = _host_flags(args)
-        new_alias: str | None = args.new_alias
+        return self._edit(args.alias, _host_flags(args), args.new_alias, dry_run=args.dry_run)
+
+    def _edit(self, alias: str, flags: dict[str, object], new_alias: str | None, *, dry_run: bool) -> int:
         if flags or new_alias:
             # With flags the change applies to the latest version of the
             # host, read under lock.
@@ -232,9 +241,9 @@ class App:
                     inv.rename(alias, host.alias)
                 inv.update(host)
 
-        if args.dry_run or new_alias is None or new_alias == alias:
-            self._change_inventory(change, dry_run=args.dry_run)
-            if not args.dry_run:
+        if dry_run or new_alias is None or new_alias == alias:
+            self._change_inventory(change, dry_run=dry_run)
+            if not dry_run:
                 self._out(f"Updated {alias}.")
             return 0
         self._rename(alias, new_alias, change)
@@ -270,29 +279,116 @@ class App:
         self._out(f"Renamed {old} to {new}.")
         self._out("Run hsm sync to update ~/.ssh/config, which still has the old name.")
 
-    def ls(self, tag: str | None, sort: str) -> int:
+    def ls(
+        self,
+        query: str | None,
+        *,
+        tag: str | None = None,
+        sort: str | None = None,
+        tree: bool = False,
+        depth: int | None = None,
+        show_hosts: bool = False,
+    ) -> int:
         inv = Inventory.load(self.paths.hosts)
-        hosts = inv.hosts(tag=tag)
-        if not hosts:
+        if not inv.hosts():
             self._out("No hosts. Add one with: hsm add <alias>")
             return 0
         state = State.load_or_empty(self.paths.state, self._warn)
-        if sort == "recent":
-            order = state.recent([h.alias for h in hosts])
+        last_used = {h.alias: when for h in inv.hosts() if (when := state.last_used(h.alias)) is not None}
+        folder = self._as_folder(inv, query)
+        text = f"group:{folder}" if folder is not None else (query or "")
+        if tag:
+            text = f"{text} tag:{shlex.quote(tag)}"
+        try:
+            hosts = search(inv.hosts(), text, last_used=last_used)
+        except SearchError as exc:
+            raise HsmError(str(exc)) from None
+        if not hosts:
+            self._out(f"No hosts match {query or text.strip()!r}.")
+            return 0
+        if tree:
+            # A search shows its hosts as leaves: the point is "where are they".
+            leaves = show_hosts or (bool(query) and folder is None)
+            for line in render_tree(hosts, root=folder, depth=depth, show_hosts=leaves):
+                self._out(line)
+            return 0
+        if sort == "recent" or (sort is None and not query):
+            order = state.recent([h.alias for h in hosts]) if sort == "recent" else sorted(h.alias for h in hosts)
             hosts = sorted(hosts, key=lambda h: order.index(h.alias))
+        elif sort == "alias":
+            hosts = sorted(hosts, key=lambda h: h.alias)
         elif sort == "tag":
             # By first tag; hosts without tags go last.
-            hosts = sorted(hosts, key=lambda h: (h.tags[0] if h.tags else "￿", h.alias))
-        rows = [("ALIAS", "HOST", "TAG", "AUTH", "LAST USED")]
+            hosts = sorted(hosts, key=lambda h: (h.tags[0] if h.tags else "\uffff", h.alias))
+        # sort None with a query: keep the search ranking (exact alias first).
+        rows = [("ALIAS", "HOST", "FOLDER", "TAG", "AUTH", "LAST USED")]
         for host in hosts:
             alias, target, tags, _note = format_line(host).split("\t")
-            used = state.last_used(host.alias)
+            used = last_used.get(host.alias)
             when = used.astimezone().strftime("%Y-%m-%d %H:%M") if used else "never"
-            rows.append((alias, target, tags or "-", host.auth, when))
+            rows.append((alias, target, host.group or "-", tags or "-", host.auth, when))
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for row in rows:
             self._out("  ".join(c.ljust(w) for c, w in zip(row, widths, strict=True)).rstrip())
         return 0
+
+    @staticmethod
+    def _as_folder(inv: Inventory, query: str | None) -> str | None:
+        """`hsm ls prod/eu`: a bare existing folder path means group:prod/eu."""
+        if not query or ":" in query or " " in query.strip():
+            return None
+        try:
+            folder = normalize_group(query)
+        except ValueError:
+            return None
+        return folder if folder is not None and folder in inv.groups() else None
+
+    def group_mv(self, folder: str, target: str, *, dry_run: bool) -> int:
+        moved: list[str] = []
+        self._change_inventory(lambda inv: moved.extend(inv.move_group(folder, target)), dry_run=dry_run)
+        if not dry_run:
+            destination = normalize_group(target) or "/"
+            self._out(f"Moved {len(moved)} host(s) from {folder} to {destination}.")
+            self._out("Run hsm sync to update the folder sections in ~/.ssh/config.")
+        return 0
+
+    def show(self, alias: str) -> int:
+        """Details of one host. Never opens the vault, never shows a secret."""
+        for line in self._details(Inventory.load(self.paths.hosts).get(alias)):
+            self._out(line)
+        return 0
+
+    def preview(self, kind: str, entry: str) -> int:
+        """fzf's preview pane: a host's details or a folder's tree. Never raises."""
+        try:
+            inv = Inventory.load(self.paths.hosts)
+            if kind == "host":
+                lines = self._details(inv.get(entry))
+            else:
+                lines = render_tree(inv.hosts(), root=entry, depth=2, show_hosts=True)
+        except (HsmError, OSError) as exc:
+            lines = [str(exc)]
+        for line in lines[:_PREVIEW_LINES]:
+            self._out(line)
+        return 0
+
+    def _details(self, host: Host) -> list[str]:
+        used = State.load_or_empty(self.paths.state, self._warn).last_used(host.alias)
+        rows = [
+            ("alias", host.alias),
+            ("hostname", host.hostname),
+            ("user", host.user or "(ssh default)"),
+            ("port", str(host.port)),
+            ("folder", host.group or "/"),
+            ("tags", " ".join(f"#{t}" for t in host.tags) or "-"),
+            ("jump host", host.jump_host or "-"),
+            ("identity", host.identity_file or "-"),
+            ("auth", host.auth),
+            ("note", host.note or "-"),
+            ("last used", used.astimezone().strftime("%Y-%m-%d %H:%M") if used else "never"),
+        ]
+        width = max(len(k) for k, _ in rows)
+        return [f"{k.ljust(width)}  {v}" for k, v in rows]
 
     def rm(self, alias: str, *, force: bool, dry_run: bool) -> int:
         if dry_run:
@@ -335,13 +431,34 @@ class App:
         inv = Inventory.load(self.paths.hosts)
         return self._connect(inv.get(alias), inv)
 
-    def pick(self) -> int:
+    def pick(self, query: str | None = None) -> int:
         inv = Inventory.load(self.paths.hosts)
         state = State.load_or_empty(self.paths.state, self._warn)
-        hosts = {h.alias: h for h in inv.hosts()}
-        ordered = [hosts[a] for a in state.recent(hosts)]
-        host = self._picker.choose(ordered)
-        return 0 if host is None else self._connect(host, inv)
+        by_alias = {h.alias: h for h in inv.hosts()}
+        hosts = [by_alias[a] for a in state.recent(by_alias)]
+        start, words = "", ""
+        if query:
+            try:
+                parsed = parse(query)
+            except SearchError as exc:
+                raise HsmError(str(exc)) from None
+            # Field filters narrow the hosts before the picker opens; the free
+            # words become its initial query, which stays editable.
+            hosts = [h for h in hosts if matches(h, Query(filters=parsed.filters))]
+            if not hosts:
+                raise HsmError(f"No hosts match {query!r}.")
+            folders = [f.value for f in parsed.filters if f.field == "group" and not f.negated and f.value != "/"]
+            if len(folders) == 1:
+                start = folders[0]
+            words = " ".join([*(_quote_term(t) for t in parsed.terms), *("-" + _quote_term(t) for t in parsed.excluded)])
+        selection = self._picker.browse(hosts, start=start, query=words)
+        if selection is None:
+            return 0
+        if selection.action == "edit":
+            return self._edit(selection.host.alias, {}, None, dry_run=False)
+        if selection.action == "copy":
+            return self.pw_get(selection.host.alias)
+        return self._connect(selection.host, inv)
 
     def _connect(self, host: Host, inv: Inventory) -> int:
         password: Secret | None = None
@@ -506,7 +623,12 @@ class App:
             hosts = Inventory.load(self.paths.hosts).hosts()
         except (HsmError, OSError):
             return 0
-        names = [h.alias for h in hosts] if kind == "aliases" else sorted({t for h in hosts for t in h.tags})
+        if kind == "groups":
+            names = list(Inventory.load(self.paths.hosts).groups())
+        elif kind == "aliases":
+            names = [h.alias for h in hosts]
+        else:
+            names = sorted({t for h in hosts for t in h.tags})
         for name in names:
             self._out(name)
         return 0
@@ -676,6 +798,7 @@ class App:
             port = int(port_text) if port_text else DEFAULT_PORT
         except ValueError:
             raise HsmError(f"Invalid port: {port_text!r}") from None
+        group = ask("Folder (e.g. prod/eu)", current.group if current else None)
         tags_text = ask("Tags (space-separated)", " ".join(current.tags) if current else None)
         jump = ask("Jump host", current.jump_host if current else None)
         identity = ask("SSH key (identity_file)", current.identity_file if current else None)
@@ -686,6 +809,7 @@ class App:
             user=user,
             port=port,
             tags=tuple(t for t in re.split(r"[\s,]+", tags_text or "") if t),
+            group=group,
             jump_host=jump,
             identity_file=identity,
             note=note,
@@ -703,8 +827,35 @@ def _host_flags(args: argparse.Namespace) -> dict[str, object]:
         "jump_host": args.jump,
         "identity_file": args.identity,
         "note": args.note,
+        "group": args.group,
     }
     return {k: v for k, v in mapping.items() if v is not None}
+
+
+def _quote_term(term: str) -> str:
+    # Back to search syntax: a word with spaces came from a quoted phrase.
+    return f'"{term}"' if " " in term else term
+
+
+# The preview pane is small: no point printing a thousand-line tree.
+_PREVIEW_LINES = 200
+
+
+def _hsm_executable() -> Path:
+    """The `hsm` script next to the interpreter running hsm (same venv/uv tool)."""
+    return Path(sys.executable).parent / "hsm"
+
+
+def preview_command(executable: Path) -> str | None:
+    """fzf's --preview command, or None if the hsm script is not there.
+
+    fzf runs it through the shell, replacing {1} and {2} with the kind and id
+    of the highlighted line (fzf quotes them). The path is quoted too, since
+    it may contain spaces.
+    """
+    if not executable.is_file():
+        return None
+    return f"{shlex.quote(str(executable))} __preview {{1}} {{2}}"
 
 
 def _status(path: Path) -> str:
@@ -726,6 +877,9 @@ def _wipe(entries: dict[str, VaultEntry]) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hsm", description="SSH host inventory with an encrypted vault.")
     parser.add_argument("--debug", action="store_true", help="show tracebacks (without local variables)")
+    parser.add_argument(
+        "-q", "--query", help="with no command: open the picker filtered by this search (e.g. 'tag:db eu')"
+    )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     def host_fields(p: argparse.ArgumentParser) -> None:
@@ -737,6 +891,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--jump", help="jump host: hsm alias or [user@]host[:port]")
         p.add_argument("--identity", help="SSH key (identity_file)")
         p.add_argument("--note")
+        p.add_argument("--group", help="folder, e.g. prod/eu (\"/\" = root)")
         p.add_argument("--dry-run", action="store_true", help="show the changes without writing them")
 
     add = sub.add_parser("add", help="add a host")
@@ -751,9 +906,23 @@ def build_parser() -> argparse.ArgumentParser:
     # dest differs from the positional `alias`: this is the NEW name.
     edit.add_argument("--alias", dest="new_alias", metavar="NEW", help="rename the host")
 
-    ls = sub.add_parser("ls", help="list hosts")
+    ls = sub.add_parser("ls", help="list or search hosts")
+    ls.add_argument("query", nargs="?", help="search (e.g. 'web tag:nginx') or a folder path")
     ls.add_argument("--tag")
-    ls.add_argument("--sort", choices=("alias", "tag", "recent"), default="alias")
+    ls.add_argument("--sort", choices=("alias", "tag", "recent"))
+    ls.add_argument("--tree", action="store_true", help="show the folder tree")
+    ls.add_argument("--depth", type=int, help="with --tree: folder levels to open")
+    ls.add_argument("--hosts", action="store_true", help="with --tree: list hosts as leaves")
+
+    group = sub.add_parser("group", help="folder management")
+    group_sub = group.add_subparsers(dest="group_command", metavar="ACTION", required=True)
+    mv = group_sub.add_parser("mv", help="move a folder and its sub-folders (\"/\" = root)")
+    mv.add_argument("folder")
+    mv.add_argument("target")
+    mv.add_argument("--dry-run", action="store_true")
+
+    show = sub.add_parser("show", help="show the details of a host (never secrets)")
+    show.add_argument("alias")
 
     rm = sub.add_parser("rm", help="remove a host")
     rm.add_argument("alias")
@@ -784,7 +953,11 @@ def build_parser() -> argparse.ArgumentParser:
     # `help=`: argparse lists only subcommands that have one (help=SUPPRESS
     # would print "==SUPPRESS==" on Python 3.12).
     helper = sub.add_parser("__complete")
-    helper.add_argument("kind", choices=("aliases", "tags"))
+    helper.add_argument("kind", choices=("aliases", "groups", "tags"))
+    # Hidden helper for fzf's preview pane.
+    preview = sub.add_parser("__preview")
+    preview.add_argument("kind", choices=("host", "folder"))
+    preview.add_argument("id")
     return parser
 
 
@@ -802,7 +975,7 @@ def main(argv: Sequence[str] | None = None, *, app: App | None = None) -> int:
     # These never write and never read secrets, so they can skip the startup
     # check: `paths` must work with wrong permissions in order to show them,
     # and completion must stay silent instead of failing on every TAB.
-    if args.command not in ("paths", "completion", "__complete"):
+    if args.command not in ("paths", "completion", "__complete", "__preview"):
         app.preflight()
     return app.run(args)
 

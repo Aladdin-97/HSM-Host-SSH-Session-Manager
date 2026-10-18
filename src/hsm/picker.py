@@ -45,7 +45,7 @@ from typing import Any
 
 from hsm.errors import HsmError
 from hsm.inventory import DEFAULT_PORT, Host, normalize_group
-from hsm.search import SearchError, search
+from hsm.search import SearchError, parse, search
 
 # fzf exit codes: 1 = no match, 130 = Esc or Ctrl-C.
 _FZF_NO_MATCH = 1
@@ -127,6 +127,20 @@ def _view(hosts: Sequence[Host], folder: str) -> _View:
     return _View(folders, below)
 
 
+def _fzf_query(query: str) -> str:
+    """The search words in fzf's syntax: "-word" becomes "!word", spaces are escaped.
+
+    Only free words reach the picker (the CLI applies the field filters
+    before), so there is nothing else to translate.
+    """
+    try:
+        parsed = parse(query)
+    except SearchError:
+        return query
+    escape = lambda term: term.replace(" ", "\\ ")  # noqa: E731 - tiny local helper
+    return " ".join([*map(escape, parsed.terms), *("!" + escape(t) for t in parsed.excluded)])
+
+
 def _parent(folder: str) -> str:
     return folder.rpartition("/")[0]
 
@@ -178,7 +192,7 @@ class Picker:
                 return self._browse_fzf(fzf, hosts, folder, query)
             except FileNotFoundError:
                 pass  # gone between which and execution: use the list
-        return self._browse_list(hosts, folder)
+        return self._browse_list(hosts, folder, query)
 
     # --- fzf -----------------------------------------------------------------
 
@@ -191,7 +205,7 @@ class Picker:
             if folder:
                 argv.append(_FZF_UP)
             if first and query:
-                argv.append(f"--query={query}")
+                argv.append(f"--query={_fzf_query(query)}")
             if self._preview is not None:
                 argv += [f"--preview={self._preview}", "--preview-window=right,50%,wrap"]
             first = False
@@ -257,8 +271,14 @@ class Picker:
 
     # --- numbered list ---------------------------------------------------------
 
-    def _browse_list(self, hosts: Sequence[Host], folder: str) -> Selection | None:
+    def _browse_list(self, hosts: Sequence[Host], folder: str, query: str = "") -> Selection | None:
         results: list[Host] | None = None  # None = browsing the folder, else search results
+        if query:
+            # An initial query (hsm -q): start from its results.
+            try:
+                results = search([h for h, _ in _view(hosts, folder).hosts], query) or None
+            except SearchError as exc:
+                self._output(str(exc))
         while True:
             view = _view(hosts, folder)
             if results is None:

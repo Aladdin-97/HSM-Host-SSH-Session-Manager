@@ -10,6 +10,7 @@ from hsm.cli import App, Paths, build_parser, main
 from hsm.errors import HsmError, InsecurePermissionsError
 from hsm.fsutil import atomic_write
 from hsm.inventory import Host, Inventory
+from hsm.picker import Selection
 from hsm.secret import Secret
 from hsm.state import State
 from hsm.touchid import Presence
@@ -59,11 +60,16 @@ class FakeClipboard:
 @dataclass
 class FakePicker:
     choice: str | None = None
+    action: str = "connect"
     offered: list[str] = field(default_factory=list)
+    start: str | None = None
+    query: str | None = None
 
-    def choose(self, hosts: list[Host]) -> Host | None:
+    def browse(self, hosts: list[Host], *, start: str = "", query: str = "") -> Selection | None:
         self.offered = [h.alias for h in hosts]
-        return next((h for h in hosts if h.alias == self.choice), None)
+        self.start, self.query = start, query
+        host = next((h for h in hosts if h.alias == self.choice), None)
+        return None if host is None else Selection(self.action, host)
 
 
 @dataclass
@@ -189,7 +195,7 @@ def test_add_with_flags(env: Env) -> None:
 
 def test_add_interactive(env: Env) -> None:
     # hostname, user, port, tag, jump, identity, note (Enter = empty/default)
-    env.answers = ["db.example.com", "postgres", "", "prod db", "", "~/.ssh/id_db", "the database"]
+    env.answers = ["db.example.com", "postgres", "", "", "prod db", "", "~/.ssh/id_db", "the database"]
     assert env.run("add", "db") == 0
     host = env.inventory().get("db")
     assert host == Host(
@@ -277,7 +283,7 @@ def test_edit_with_flags_keeps_other_fields(env: Env) -> None:
 def test_edit_interactive_keeps_defaults_and_clears_with_dash(env: Env) -> None:
     _add_web01(env, "--note", "old note")
     # alias, hostname, user, port, tag, jump, identity, note
-    env.answers = ["", "", "-", "", "", "", "", "-"]
+    env.answers = ["", "", "-", "", "", "", "", "", "-"]
     assert env.run("edit", "web01") == 0
     host = env.inventory().get("web01")
     assert (host.hostname, host.user, host.note) == ("10.0.0.1", None, None)
@@ -600,7 +606,7 @@ def test_add_interactive_does_not_lose_hosts_added_meanwhile(env: Env) -> None:
         return original(prompt)
 
     env._ask = ask  # type: ignore[method-assign]
-    env.answers = ["h.lan", "", "", "", "", "", ""]
+    env.answers = ["h.lan", "", "", "", "", "", "", ""]
     env.run("add", "mine")
     inv = env.inventory()
     assert inv.get("added-meanwhile") and inv.get("mine")
@@ -724,7 +730,7 @@ def test_edit_alias_together_with_other_flags(env: Env) -> None:
 
 def test_edit_interactive_asks_alias_first(env: Env) -> None:
     _add_web01(env)
-    env.answers = ["web02", "", "", "", "", "", "", ""]
+    env.answers = ["web02", "", "", "", "", "", "", "", ""]
     env.run("edit", "web01")
     assert env.inventory().get("web02").hostname == "10.0.0.1"
 
@@ -768,7 +774,7 @@ def test_add_interactive_label_mentions_ip(env: Env) -> None:
         return original(prompt)
 
     env._ask = ask  # type: ignore[method-assign]
-    env.answers = ["10.0.0.1", "", "", "", "", "", ""]
+    env.answers = ["10.0.0.1", "", "", "", "", "", "", ""]
     env.run("add", "web01")
     assert prompts[0].startswith("Hostname or IP")
 
@@ -808,14 +814,14 @@ def test_add_password_cancelled_unlock_adds_nothing(env: Env) -> None:
 
 
 def test_add_interactive_offers_password(env: Env) -> None:
-    env.answers = ["10.0.0.9", "admin", "", "", "", "", "", "y"]
+    env.answers = ["10.0.0.9", "admin", "", "", "", "", "", "", "y"]
     env.secrets = ["host-pw", "host-pw", MASTER, MASTER]
     env.run("add", "legacy01")
     assert env.inventory().get("legacy01").auth == "password"
 
 
 def test_add_interactive_default_is_key(env: Env) -> None:
-    env.answers = ["10.0.0.1", "", "", "", "", "", "", ""]
+    env.answers = ["10.0.0.1", "", "", "", "", "", "", "", ""]
     env.run("add", "web01")
     assert env.inventory().get("web01").auth == "key"
     assert not env.paths.vault.exists()
@@ -927,3 +933,223 @@ def test_complete_command_is_hidden_from_help(capsys: pytest.CaptureFixture[str]
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--help"])
     assert "__complete" not in capsys.readouterr().out
+
+
+# --- folders -------------------------------------------------------------------------
+
+
+def _fleet(env: Env) -> None:
+    for args in (
+        ("bastion", "b.example.com", "prod/eu"),
+        ("web01", "10.1.0.1", "prod/eu/web"),
+        ("web02", "10.1.0.2", "prod/eu/web"),
+        ("db01", "10.1.0.9", "prod/eu/db"),
+        ("api01", "10.2.0.1", "prod/us"),
+    ):
+        assert env.run("add", args[0], "--ip", args[1], "--group", args[2]) == 0
+    env.run("add", "laptop", "--ip", "laptop.lan", "--tag", "home")
+    env.out.clear()
+
+
+def test_add_and_edit_with_group(env: Env) -> None:
+    env.run("add", "web01", "--ip", "10.0.0.1", "--group", "/prod/eu/")
+    assert env.inventory().get("web01").group == "prod/eu"
+    env.run("edit", "web01", "--group", "prod/us")
+    assert env.inventory().get("web01").group == "prod/us"
+
+
+def test_interactive_add_asks_for_the_folder(env: Env) -> None:
+    prompts: list[str] = []
+    original = env._ask
+
+    def ask(prompt: str) -> str:
+        prompts.append(prompt)
+        return original(prompt)
+
+    env._ask = ask  # type: ignore[method-assign]
+    env.answers = ["10.0.0.1", "", "", "prod/eu", "", "", "", ""]
+    env.run("add", "web01")
+    assert any(p.startswith("Folder") for p in prompts)
+    assert env.inventory().get("web01").group == "prod/eu"
+
+
+def test_ls_shows_the_folder_column(env: Env) -> None:
+    _fleet(env)
+    env.run("ls")
+    assert "FOLDER" in env.out[0]
+    assert any("prod/eu/web" in line for line in env.out if line.startswith("web01"))
+
+
+def test_ls_with_a_search(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "group:prod/eu web")
+    assert [line.split()[0] for line in env.out[1:]] == ["web01", "web02"]
+
+
+def test_ls_with_a_bare_folder_path(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "prod/eu")
+    assert {line.split()[0] for line in env.out[1:]} == {"bastion", "web01", "web02", "db01"}
+
+
+def test_ls_search_ranks_exact_alias_first(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "web02")
+    assert env.out[1].split()[0] == "web02"
+
+
+def test_ls_search_without_results(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "tag:nope")
+    assert env.out == ["No hosts match 'tag:nope'."]
+
+
+def test_ls_invalid_search_is_a_clean_error(env: Env) -> None:
+    _fleet(env)
+    with pytest.raises(HsmError, match="auth"):
+        env.run("ls", "auth:maybe")
+
+
+def test_ls_tree(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "--tree")
+    assert env.out[0].split() == ["prod/", "5"]
+    assert any("web/" in line and line.endswith("2") for line in env.out)
+    assert env.out[-1].split() == ["(no", "folder)", "1"]
+
+
+def test_ls_tree_with_depth_and_folder(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "--tree", "--depth", "1", "prod/eu")
+    assert [line.split()[0] for line in env.out] == ["prod/eu/", "├──", "└──"]
+
+
+def test_ls_tree_with_a_search_shows_where_the_hosts_are(env: Env) -> None:
+    _fleet(env)
+    env.run("ls", "--tree", "web0")
+    text = "\n".join(env.out)
+    assert "web01" in text and "web02" in text and "db01" not in text
+
+
+def test_group_mv(env: Env) -> None:
+    _fleet(env)
+    assert env.run("group", "mv", "prod/eu", "prod/europe") == 0
+    inv = env.inventory()
+    assert inv.get("web01").group == "prod/europe/web"
+    assert inv.get("api01").group == "prod/us"
+    assert "4" in env.text() and "hsm sync" in env.text()
+
+
+def test_group_mv_to_root_and_dry_run(env: Env) -> None:
+    _fleet(env)
+    before = env.paths.hosts.read_text()
+    env.run("group", "mv", "prod/us", "/", "--dry-run")
+    assert env.paths.hosts.read_text() == before
+    assert '-group = "prod/us"' in env.text()
+    env.run("group", "mv", "prod/us", "/")
+    assert env.inventory().get("api01").group is None
+
+
+def test_group_mv_unknown_folder(env: Env) -> None:
+    _fleet(env)
+    with pytest.raises(HsmError, match="nope"):
+        env.run("group", "mv", "nope", "x")
+
+
+# --- show and preview -----------------------------------------------------------------
+
+
+def test_show_prints_every_field_but_no_secret(env: Env) -> None:
+    _add_web01(env, "--group", "prod/eu", "--tag", "nginx", "--note", "main frontend")
+    _vault_with_password(env, "web01", "host-pw")
+    env.out.clear()
+    unlocks = env.unlocks
+    assert env.run("show", "web01") == 0
+    text = env.text()
+    for expected in ("web01", "10.0.0.1", "deploy", "prod/eu", "#nginx", "main frontend", "password", "never"):
+        assert expected in text, expected
+    assert "host-pw" not in text
+    assert env.unlocks == unlocks  # never opens the vault
+
+
+def test_show_unknown_host(env: Env) -> None:
+    with pytest.raises(HsmError, match="nope"):
+        env.run("show", "nope")
+
+
+def test_preview_of_a_host_and_of_a_folder(env: Env) -> None:
+    _fleet(env)
+    env.run("__preview", "host", "web01")
+    assert "10.1.0.1" in env.text()
+    env.out.clear()
+    env.run("__preview", "folder", "prod/eu")
+    text = env.text()
+    assert "web/" in text and "web01" in text
+
+
+def test_preview_never_fails_loudly(env: Env) -> None:
+    _fleet(env)
+    assert env.run("__preview", "host", "nope") == 0
+    assert "nope" in env.text()
+
+
+def test_preview_command_quotes_the_hsm_path(tmp_path: Path) -> None:
+    from hsm.cli import preview_command
+
+    exe = tmp_path / "with space" / "hsm"
+    exe.parent.mkdir()
+    exe.write_text("")
+    command = preview_command(exe)
+    assert command == f"'{exe}' __preview {{1}} {{2}}"
+    assert preview_command(tmp_path / "missing") is None
+
+
+# --- picker from the CLI ----------------------------------------------------------------
+
+
+def test_picker_with_query_prefilters_by_fields_and_passes_free_words(env: Env) -> None:
+    _fleet(env)
+    env.picker.choice = None
+    env.app().pick("group:prod/eu web -db")
+    assert set(env.picker.offered) == {"bastion", "web01", "web02", "db01"}
+    assert env.picker.start == "prod/eu"  # a single group: filter starts in that folder
+    assert env.picker.query == "web -db"
+
+
+def test_picker_query_without_matches(env: Env) -> None:
+    _fleet(env)
+    with pytest.raises(HsmError, match="No hosts match"):
+        env.app().pick("tag:nope")
+
+
+def test_picker_edit_action_runs_the_interactive_edit(env: Env) -> None:
+    _fleet(env)
+    env.picker.choice, env.picker.action = "web01", "edit"
+    # alias, hostname, user, port, folder, tags, jump, identity, note
+    env.answers = ["", "", "", "2222", "", "", "", "", ""]
+    assert env.run() == 0
+    assert env.inventory().get("web01").port == 2222
+    assert env.connector.calls == []
+
+
+def test_picker_copy_action_copies_the_password(env: Env) -> None:
+    _add_web01(env)
+    _vault_with_password(env, "web01", "host-pw")
+    env.picker.choice, env.picker.action = "web01", "copy"
+    env.secrets = [MASTER]
+    env.run()
+    assert env.clipboard.copied == [(b"host-pw", 30)]
+    assert env.connector.calls == []
+
+
+def test_top_level_query_option(env: Env) -> None:
+    _fleet(env)
+    env.picker.choice = None
+    assert main(["-q", "tag:home"], app=env.app()) == 0
+    assert env.picker.offered == ["laptop"]
+
+
+def test_complete_groups(env: Env) -> None:
+    _fleet(env)
+    env.run("__complete", "groups")
+    assert env.out == ["prod", "prod/eu", "prod/eu/db", "prod/eu/web", "prod/us"]
