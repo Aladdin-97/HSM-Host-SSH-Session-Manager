@@ -21,6 +21,17 @@ hosts that leave no choice.
 > [THREAT_MODEL.md](THREAT_MODEL.md): what hsm protects against and what it
 > does not.
 
+![hsm ls --tree shows the folder tree with host counts; hsm ls "tag:postgres" lists the matching hosts](img/Screenshot-1.png)
+
+*Folder tree (`hsm ls --tree`) and a search by tag (`hsm ls "tag:postgres"`).*
+
+![The interactive picker inside acme/shop/prod/eu: subfolders and hosts on the left, the db/ folder previewed on the right](img/Screenshot-2.png)
+
+*The [picker](#picker) browsing a folder, with the preview pane on the right.*
+
+All hosts and addresses in the screenshots are fictional (RFC 5737
+documentation ranges and `example.com`).
+
 ---
 
 ## Contents
