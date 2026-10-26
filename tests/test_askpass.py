@@ -3,6 +3,7 @@ import os
 import stat
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -184,12 +185,15 @@ def test_installed_helper_executable_answers() -> None:
     assert result.stdout == b"real-pw\n"
 
 
-@pytest.mark.skipif(
+needs_sshd = pytest.mark.skipif(
     os.environ.get("HSM_SSHD_TESTS") != "1",
     reason="starts a temporary sshd on 127.0.0.1: enable with HSM_SSHD_TESTS=1",
 )
-def test_with_real_ssh_and_sshd(tmp_path: Path) -> None:
-    import getpass
+
+
+@pytest.fixture
+def sshd(tmp_path: Path) -> Iterator[tuple[int, Path]]:
+    """A password-only sshd on 127.0.0.1: (port, its log)."""
     import socket
     import time
 
@@ -205,41 +209,99 @@ def test_with_real_ssh_and_sshd(tmp_path: Path) -> None:
         "KbdInteractiveAuthentication no\nPubkeyAuthentication no\nStrictModes no\n"
     )
     log = srv_dir / "sshd.log"
-    sshd = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-f", str(srv_dir / "sshd_config")], stderr=log.open("w"))
+    proc = subprocess.Popen(["/usr/sbin/sshd", "-D", "-e", "-f", str(srv_dir / "sshd_config")], stderr=log.open("w"))
     try:
         time.sleep(1)
-        user = getpass.getuser()
-        known = tmp_path / "known_hosts"
-        helper = Path(sys.executable).parent / "hsm-askpass"
-        base = [
-            "/usr/bin/ssh", "-F", "/dev/null", "-p", str(port), "-l", user,
-            "-o", f"UserKnownHostsFile={known}", "-o", "PreferredAuthentications=password",
-            "-o", "NumberOfPasswordPrompts=1", "--", "127.0.0.1", "true",
-        ]  # fmt: skip
-
-        # 1. Unknown host key, no terminal: the helper does NOT confirm.
-        with AskpassServer(Secret(b"pw"), user=user, hostname="127.0.0.1") as srv:
-            proc = subprocess.Popen(base, env={**os.environ, **srv.env(str(helper))},
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # fmt: skip
-            srv.expect_ssh(proc.pid)
-            assert proc.wait(timeout=20) != 0
-        assert not known.exists() or known.read_text() == ""
-
-        # 2. Host key already known: the password reaches the server on its own.
-        keyscan = subprocess.run(["ssh-keyscan", "-p", str(port), "127.0.0.1"], capture_output=True, text=True)
-        known.write_text(keyscan.stdout)
-        with AskpassServer(Secret(b"pw-from-vault"), user=user, hostname="127.0.0.1") as srv:
-            proc = subprocess.Popen(base, env={**os.environ, **srv.env(str(helper))},
-                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # fmt: skip
-            srv.expect_ssh(proc.pid)
-            proc.wait(timeout=20)
-        time.sleep(0.3)
-        # A non-root sshd cannot verify passwords: "Failed password"
-        # proves the password made it all the way to the server.
-        assert "Failed password" in log.read_text()
+        yield port, log
     finally:
-        sshd.terminate()
-        sshd.wait(timeout=5)
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+@needs_sshd
+def test_with_real_ssh_and_sshd(tmp_path: Path, sshd: tuple[int, Path]) -> None:
+    import getpass
+    import time
+
+    port, log = sshd
+    user = getpass.getuser()
+    known = tmp_path / "known_hosts"
+    helper = Path(sys.executable).parent / "hsm-askpass"
+    base = [
+        "/usr/bin/ssh", "-F", "/dev/null", "-p", str(port), "-l", user,
+        "-o", f"UserKnownHostsFile={known}", "-o", "PreferredAuthentications=password",
+        "-o", "NumberOfPasswordPrompts=1", "--", "127.0.0.1", "true",
+    ]  # fmt: skip
+
+    # 1. Unknown host key, no terminal: the helper does NOT confirm.
+    with AskpassServer(Secret(b"pw"), user=user, hostname="127.0.0.1") as srv:
+        proc = subprocess.Popen(base, env={**os.environ, **srv.env(str(helper))},
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # fmt: skip
+        srv.expect_ssh(proc.pid)
+        assert proc.wait(timeout=20) != 0
+    assert not known.exists() or known.read_text() == ""
+
+    # 2. Host key already known: the password reaches the server on its own.
+    keyscan = subprocess.run(["ssh-keyscan", "-p", str(port), "127.0.0.1"], capture_output=True, text=True)
+    known.write_text(keyscan.stdout)
+    with AskpassServer(Secret(b"pw-from-vault"), user=user, hostname="127.0.0.1") as srv:
+        proc = subprocess.Popen(base, env={**os.environ, **srv.env(str(helper))},
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # fmt: skip
+        srv.expect_ssh(proc.pid)
+        proc.wait(timeout=20)
+    time.sleep(0.3)
+    # A non-root sshd cannot verify passwords: "Failed password"
+    # proves the password made it all the way to the server.
+    assert "Failed password" in log.read_text()
+
+
+@needs_sshd
+# The server thread makes forkpty() warn; the child only calls execve, so it
+# cannot deadlock on a lock held by another thread.
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_real_ssh_unknown_host_key_asks_on_the_terminal(tmp_path: Path, sshd: tuple[int, Path]) -> None:
+    """With a real terminal, the host key question reaches you and `yes` is accepted.
+
+    Regression: /dev/tty was opened with open(..., "r+"), which fails on a
+    terminal (not seekable); the helper answered "no" without asking.
+    """
+    import getpass
+    import pty
+    import time
+
+    port, _ = sshd
+    user = getpass.getuser()
+    known = tmp_path / "known_hosts"
+    helper = Path(sys.executable).parent / "hsm-askpass"
+    argv = [
+        "/usr/bin/ssh", "-F", "/dev/null", "-p", str(port), "-l", user,
+        "-o", f"UserKnownHostsFile={known}", "-o", "PreferredAuthentications=password",
+        "-o", "NumberOfPasswordPrompts=1", "--", "127.0.0.1", "true",
+    ]  # fmt: skip
+    with AskpassServer(Secret(b"pw"), user=user, hostname="127.0.0.1") as srv:
+        env = {**os.environ, **srv.env(str(helper))}
+        pid, fd = pty.fork()  # ssh gets a real controlling terminal
+        if pid == 0:
+            os.execve(argv[0], argv, env)
+        srv.expect_ssh(pid)
+        shown, answered = b"", False
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:  # EIO: ssh has exited and closed the terminal
+                break
+            if not chunk:
+                break
+            shown += chunk
+            if not answered and b"continue connecting" in shown:
+                os.write(fd, b"yes\n")
+                answered = True
+        os.waitpid(pid, 0)
+        os.close(fd)
+    assert answered, shown
+    assert b"Host key verification failed" not in shown
+    assert known.read_text().strip()  # the accepted key was saved
 
 
 # --- relay to /dev/tty (simulated) ------------------------------------------------
@@ -259,7 +321,7 @@ def test_relay_yes_no_reads_visible_line(monkeypatch: pytest.MonkeyPatch) -> Non
     from hsm import askpass
 
     tty = FakeTty("yes\n")
-    monkeypatch.setattr(askpass, "open", lambda *a, **k: tty, raising=False)
+    monkeypatch.setattr(askpass, "_open_tty", lambda: tty)
     assert askpass._relay_to_tty(HOSTKEY_PROMPT) == "yes"
     assert tty.shown == [HOSTKEY_PROMPT]  # the full question reaches you
 
@@ -267,7 +329,7 @@ def test_relay_yes_no_reads_visible_line(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_relay_secret_prompt_uses_getpass(monkeypatch: pytest.MonkeyPatch) -> None:
     from hsm import askpass
 
-    monkeypatch.setattr(askpass, "open", lambda *a, **k: FakeTty(""), raising=False)
+    monkeypatch.setattr(askpass, "_open_tty", lambda: FakeTty(""))
     monkeypatch.setattr(askpass.getpass, "getpass", lambda prompt: "typed-secret")
     assert askpass._relay_to_tty("jump@bastion's password: ") == "typed-secret"
 
@@ -275,12 +337,12 @@ def test_relay_secret_prompt_uses_getpass(monkeypatch: pytest.MonkeyPatch) -> No
 def test_relay_without_tty_or_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
     from hsm import askpass
 
-    def no_tty(*a: object, **k: object) -> None:
+    def no_tty() -> None:
         raise OSError("no tty")
 
-    monkeypatch.setattr(askpass, "open", no_tty, raising=False)
+    monkeypatch.setattr(askpass, "_open_tty", no_tty)
     assert askpass._relay_to_tty("x") is None
-    monkeypatch.setattr(askpass, "open", lambda *a, **k: FakeTty(""), raising=False)
+    monkeypatch.setattr(askpass, "_open_tty", lambda: FakeTty(""))
     assert askpass._relay_to_tty(HOSTKEY_PROMPT) is None  # EOF on the confirmation
 
     def eof(prompt: str) -> str:
@@ -387,7 +449,7 @@ def test_host_key_question_is_recognized_strictly() -> None:
 def test_server_text_with_yes_no_does_not_echo(monkeypatch: pytest.MonkeyPatch) -> None:
     from hsm import askpass
 
-    monkeypatch.setattr(askpass, "open", lambda *a, **k: FakeTty(""), raising=False)
+    monkeypatch.setattr(askpass, "_open_tty", lambda: FakeTty(""))
     monkeypatch.setattr(askpass.getpass, "getpass", lambda prompt: "hidden")
     # A server that includes "(yes/no" must not be able to make an OTP visible on screen.
     assert askpass._relay_to_tty("(u@h) Code (yes/no): ") == "hidden"
@@ -397,7 +459,7 @@ def test_control_characters_are_stripped_before_reaching_the_terminal(monkeypatc
     from hsm import askpass
 
     seen: list[str] = []
-    monkeypatch.setattr(askpass, "open", lambda *a, **k: FakeTty(""), raising=False)
+    monkeypatch.setattr(askpass, "_open_tty", lambda: FakeTty(""))
     monkeypatch.setattr(askpass.getpass, "getpass", lambda prompt: seen.append(prompt) or "x")
     askpass._relay_to_tty("(u@h) \x1b]0;evil\x07Password\x1b[2J: ")
     assert "\x1b" not in seen[0] and "\x07" not in seen[0]

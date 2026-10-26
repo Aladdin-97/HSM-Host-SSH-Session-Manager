@@ -48,6 +48,7 @@ inside hsm's trust boundary (see THREAT_MODEL.md).
 import contextlib
 import getpass
 import hmac
+import io
 import os
 import re
 import secrets
@@ -329,11 +330,21 @@ def _restore_tty_on_sigterm() -> Iterator[None]:
         signal.signal(signal.SIGTERM, previous)
 
 
+def _open_tty() -> io.TextIOWrapper:
+    """The terminal, for reading and writing.
+
+    Not open("/dev/tty", "r+"): in text mode that wraps the file in
+    BufferedRandom, which needs a seekable file, and a terminal is not. Like
+    getpass, we use FileIO directly.
+    """
+    return io.TextIOWrapper(io.FileIO("/dev/tty", "r+"), encoding="utf-8", errors="replace")
+
+
 def _relay_to_tty(prompt: str) -> str | None:
     """Relays the question to the user on the terminal. None if there is no terminal."""
     shown = _printable(prompt)
     try:
-        tty = open("/dev/tty", "r+", encoding="utf-8", errors="replace")  # noqa: SIM115
+        tty = _open_tty()
     except OSError:
         return None
     with tty:
