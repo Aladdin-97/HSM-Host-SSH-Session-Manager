@@ -480,10 +480,14 @@ fzf is much more comfortable.
 **With fzf: one full-screen fzf per folder**
 - The header says where you are and how many hosts are below:
   `hsm › <folder>  ·  N hosts`, followed by the key help.
-- The screen lists the **sub-folders**, with their host count, then
-  **every host below** the current folder, with its relative path
-  (`web/web03`). Typing therefore searches the whole sub-tree, while Enter
-  on a folder narrows it.
+- With an empty query the screen lists only what is **directly in the
+  folder**: the sub-folders, with their host count, then the hosts of the
+  folder itself. At the root that means the top folders and the hosts
+  without a folder.
+- **As soon as you type, the search covers the whole inventory**, from any
+  folder: every folder and every host, shown with its full path
+  (`acme/shop/prod/eu/web/shop-web-eu-03`). Emptying the query brings the
+  folder back.
 - The right pane previews the highlighted line: a host's details (as in
   `hsm show`) or a folder's tree. It comes from a hidden helper,
   `hsm __preview`.
@@ -500,8 +504,8 @@ fzf is much more comfortable.
 - It shows the sub-folders and the hosts directly in the folder. A number
   opens a folder or picks a host, `..` goes up, Enter on an empty line
   quits.
-- **Any other text is a search** (the full [syntax](#search)) in the
-  current folder and below, showing at most 30 rows.
+- **Any other text is a search** (the full [syntax](#search)) over the
+  whole inventory, as in fzf, showing at most 30 rows.
 - The search picks on its own only if the text is **exactly an alias**;
   otherwise you need the number, so a typo does not connect you to some
   random host.

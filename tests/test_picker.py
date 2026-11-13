@@ -1,6 +1,8 @@
+import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -27,9 +29,19 @@ class FakeFzf:
     script: list[tuple[int, str]] = field(default_factory=list)
     calls: list[tuple[list[str], dict[str, Any]]] = field(default_factory=list)
     raises: BaseException | None = None
+    # Per call: the two lists fzf can reload, read while they still exist.
+    files: list[dict[str, str]] = field(default_factory=list)
 
     def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append((list(argv), kwargs))
+        env = kwargs.get("env", {})
+        self.files.append(
+            {
+                name: Path(env[var]).read_text() + oct(Path(env[var]).stat().st_mode & 0o777)
+                for name, var in (("here", "HSM_PICKER_HERE"), ("everywhere", "HSM_PICKER_EVERYWHERE"))
+                if var in env
+            }
+        )
         if self.raises is not None:
             raise self.raises
         code, out = self.script.pop(0) if self.script else (130, "")
@@ -37,6 +49,10 @@ class FakeFzf:
 
     def lines(self, call: int = -1) -> list[str]:
         return self.calls[call][1]["input"].splitlines()
+
+    def search_lines(self, call: int = -1) -> list[str]:
+        """What fzf shows as soon as you type."""
+        return self.files[call]["everywhere"].rsplit("\n", 1)[0].splitlines()
 
     def header(self, call: int = -1) -> str:
         return next(a for a in self.calls[call][0] if a.startswith("--header=")).removeprefix("--header=")
@@ -89,23 +105,60 @@ def test_format_line_brackets_ipv6_only_with_port() -> None:
 # --- fzf: what each screen contains -------------------------------------------------
 
 
-def test_root_screen_lists_folders_then_hosts_of_the_whole_tree() -> None:
+def test_root_screen_lists_only_top_folders_and_hosts_without_a_folder() -> None:
     fake = FakeFzf()
     fzf_picker(fake).browse(HOSTS)
     shown = [line.split("\t")[:2] for line in fake.lines()]
-    assert shown[0] == ["folder", "prod"]
-    # Then every host, folders' hosts included, so typing searches everything.
-    assert ["host", "laptop"] in shown and ["host", "web01"] in shown
-    assert len([s for s in shown if s[0] == "host"]) == len(HOSTS)
+    assert shown == [["folder", "prod"], ["host", "laptop"]]
 
 
-def test_hosts_in_subfolders_show_their_relative_path() -> None:
-    fake = FakeFzf()
-    fzf_picker(fake).browse(HOSTS)
-    assert "prod/eu/web/web01" in row(fake, 0, "web01")
+def test_a_folder_shows_its_sub_folders_and_its_own_hosts() -> None:
     fake = FakeFzf()
     fzf_picker(fake).browse(HOSTS, start="prod/eu")
-    assert "web/web01" in row(fake, 0, "web01") and "prod/eu/web" not in row(fake, 0, "web01")
+    shown = [line.split("\t")[:2] for line in fake.lines()]
+    assert shown == [["folder", "prod/eu/db"], ["folder", "prod/eu/web"], ["host", "bastion-eu"]]
+
+
+def test_typing_searches_the_whole_inventory_from_any_folder() -> None:
+    fake = FakeFzf()
+    fzf_picker(fake).browse(HOSTS, start="prod/eu/web")
+    everywhere = [line.split("\t")[:2] for line in fake.search_lines()]
+    folders = [entry for kind, entry in everywhere if kind == "folder"]
+    assert folders == ["prod", "prod/eu", "prod/eu/db", "prod/eu/web", "prod/us"]
+    assert [entry for kind, entry in everywhere if kind == "host"] == [h.alias for h in HOSTS]
+    # Full paths, since the results come from anywhere.
+    assert "prod/us/api01" in next(line for line in fake.search_lines() if "\tapi01\t" in line)
+
+
+def test_fzf_switches_list_on_the_query_and_files_are_private() -> None:
+    fake = FakeFzf()
+    fzf_picker(fake).browse(HOSTS)
+    argv, kwargs = fake.calls[0]
+    assert any(a.startswith("--bind=change:transform:") and "$FZF_QUERY" in a for a in argv)
+    assert fake.files[0]["here"].endswith("0o600") and fake.files[0]["everywhere"].endswith("0o600")
+    assert fake.files[0]["here"].removesuffix("0o600") == kwargs["input"]
+    directory = os.path.dirname(kwargs["env"]["HSM_PICKER_HERE"])
+    assert not os.path.exists(directory)  # removed once fzf is done
+
+
+def test_initial_query_starts_from_the_whole_inventory() -> None:
+    fake = FakeFzf()
+    fzf_picker(fake).browse(HOSTS, start="prod/eu", query="api")
+    assert fake.lines() == fake.search_lines()
+
+
+def test_choosing_a_search_result_outside_the_folder_works() -> None:
+    fake = FakeFzf(script=[(0, "\nhost\tapi01\tprod/us/api01\n")])
+    assert fzf_picker(fake).browse(HOSTS, start="prod/eu/web") == Selection("connect", API)
+    fake = FakeFzf(script=[(0, "\nfolder\tprod/us\tprod/us/\n")])
+    fzf_picker(fake).browse(HOSTS, start="prod/eu/web")
+    assert "prod/us" in fake.header(1)
+
+
+def test_hosts_in_subfolders_show_their_path_in_the_search() -> None:
+    fake = FakeFzf()
+    fzf_picker(fake).browse(HOSTS)
+    assert "prod/eu/web/web01" in next(line for line in fake.search_lines() if "\tweb01\t" in line)
 
 
 def test_folder_rows_show_their_host_count() -> None:
@@ -117,7 +170,7 @@ def test_folder_rows_show_their_host_count() -> None:
 def test_hosts_keep_the_given_order() -> None:
     fake = FakeFzf()
     fzf_picker(fake).browse([API, WEB01, LAPTOP])
-    hosts = [line.split("\t")[1] for line in fake.lines() if line.startswith("host")]
+    hosts = [line.split("\t")[1] for line in fake.search_lines() if line.startswith("host")]
     assert hosts == ["api01", "web01", "laptop"]
 
 
@@ -298,10 +351,9 @@ def test_list_search_uses_the_full_syntax_on_the_subtree() -> None:
     assert list_picker(console).browse(HOSTS) == Selection("connect", WEB02)
 
 
-def test_list_search_is_limited_to_the_current_folder() -> None:
-    console = Console(answers=["api"])
-    list_picker(console).browse(HOSTS, start="prod/eu")
-    assert "No host matches" in console.text()
+def test_list_search_covers_the_whole_inventory() -> None:
+    console = Console(answers=["api", "1"])
+    assert list_picker(console).browse(HOSTS, start="prod/eu") == Selection("connect", API)
 
 
 def test_list_exact_alias_selects_it() -> None:

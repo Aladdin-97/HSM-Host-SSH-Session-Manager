@@ -4,15 +4,19 @@ With fzf (the "k9s-like" mode) every folder is a full-screen fzf screen:
 
     hsm › prod/eu  ·  140 hosts
     enter open/connect · ⌫ up · ctrl-e edit · ctrl-y copy password · esc quit
-    > web 03
+    >
       db/                         12 hosts
       web/                       128 hosts
       bastion-eu                  jump@10.1.0.1      #infra
-      web/web03                   deploy@10.1.2.3    #nginx
 
-- sub-folders first, with their host count; then EVERY host below the
-  current folder, with its relative path, so typing searches the whole
-  sub-tree while Enter on a folder narrows it;
+- with an empty query, only what is directly in the folder: sub-folders
+  first, with their host count, then the hosts of the folder itself;
+- as soon as you type, the search covers the WHOLE inventory, from any
+  folder: every folder and every host, with its full path. Emptying the
+  query brings back the folder. fzf switches between the two lists with
+  `reload`, reading them from two files in a private (0700) temporary
+  directory, removed when the picker closes; they hold what the screen
+  shows, never secrets;
 - Enter opens a folder or picks a host; Backspace on an empty query goes up
   (fzf's backward-eof prints ".."); ctrl-e / ctrl-y pick the host for
   editing or for copying its password; Esc quits;
@@ -29,16 +33,19 @@ escape sequences), so they cannot tamper with the terminal.
 
 Without fzf: a numbered list per folder (sub-folders and the hosts directly
 in it). A number opens a folder or picks a host, ".." goes up, any other text
-is a search (search.py syntax: words, tag:, group:...) over the current
-folder and below, showing at most 30 results. A search picks on its own only
+is a search (search.py syntax: words, tag:, group:...) over the whole
+inventory, like in fzf, showing at most 30 results. A search picks on its own only
 if the text is exactly an alias: otherwise the number is required, so a typo
 does not take you to some random host.
 """
 
+import contextlib
 import os
 import re
 import shutil
 import subprocess
+import tempfile
+from collections.abc import Iterator
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -62,6 +69,17 @@ _FZF_OPTIONS = [
     "--tiebreak=index",
     "--prompt=hsm> ",
     "--expect=ctrl-e,ctrl-y",
+]
+# Empty query: the folder's own lines; any text: the whole inventory. fzf
+# exports the query as $FZF_QUERY to the command; the file paths come from
+# the environment, so no path is ever pasted into a shell command.
+_ENV_HERE = "HSM_PICKER_HERE"
+_ENV_EVERYWHERE = "HSM_PICKER_EVERYWHERE"
+_FZF_SWITCH = [
+    "--with-shell=/bin/sh -c",
+    "--bind=change:transform:"
+    f'[ -n "$FZF_QUERY" ] && echo "reload-sync(cat \\"\\${_ENV_EVERYWHERE}\\")" '
+    f'|| echo "reload-sync(cat \\"\\${_ENV_HERE}\\")"',
 ]
 # Backspace on an empty query: print ".." and accept, i.e. "go up".
 # Not bound at the root, where there is nothing above.
@@ -97,6 +115,11 @@ class _View:
     folders: list[_Folder]  # direct sub-folders, alphabetical
     hosts: list[tuple[Host, str]]  # every host below, with its path relative to the folder
 
+    @property
+    def own_hosts(self) -> list[Host]:
+        """The hosts directly in the folder."""
+        return [host for host, rel in self.hosts if not rel]
+
 
 def format_line(host: Host) -> str:
     """alias, [user@]host[:port], #tags, note — tab-separated."""
@@ -125,6 +148,31 @@ def _view(hosts: Sequence[Host], folder: str) -> _View:
         for name in sorted(counts)
     ]
     return _View(folders, below)
+
+
+def _all_folders(hosts: Sequence[Host]) -> list[_Folder]:
+    """Every folder of the inventory, alphabetical, named by its full path."""
+    counts: dict[str, int] = {}
+    for host in hosts:
+        parts = (host.group or "").split("/") if host.group else []
+        for depth in range(1, len(parts) + 1):
+            path = "/".join(parts[:depth])
+            counts[path] = counts.get(path, 0) + 1
+    return [_Folder(path=path, name=path, count=counts[path]) for path in sorted(counts)]
+
+
+@contextlib.contextmanager
+def _line_files(here: Sequence[str], everywhere: Sequence[str]) -> Iterator[dict[str, str]]:
+    """The two lists fzf reloads, in a 0700 directory removed on exit: their env variables."""
+    with tempfile.TemporaryDirectory(prefix="hsm-picker-") as directory:
+        env = {}
+        for name, lines in ((_ENV_HERE, here), (_ENV_EVERYWHERE, everywhere)):
+            path = os.path.join(directory, name.lower())
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("".join(line + "\n" for line in lines))
+            env[name] = path
+        yield env
 
 
 def _fzf_query(query: str) -> str:
@@ -199,24 +247,29 @@ class Picker:
     def _browse_fzf(self, fzf: str, hosts: Sequence[Host], folder: str, query: str) -> Selection | None:
         first = True
         no_match = 0
+        everywhere = self._fzf_lines(_all_folders(hosts), [(h, h.group or "") for h in hosts])
         while True:
             view = _view(hosts, folder)
-            argv = [fzf, *_FZF_OPTIONS, f"--header={self._header(folder, view)}"]
+            here = self._fzf_lines(view.folders, [(h, "") for h in view.own_hosts])
+            argv = [fzf, *_FZF_OPTIONS, *_FZF_SWITCH, f"--header={self._header(folder, view)}"]
             if folder:
                 argv.append(_FZF_UP)
-            if first and query:
+            searching = first and bool(query)
+            if searching:
                 argv.append(f"--query={_fzf_query(query)}")
             if self._preview is not None:
                 argv += [f"--preview={self._preview}", "--preview-window=right,50%,wrap"]
             first = False
-            result: Any = self._runner(
-                argv,
-                input="".join(line + "\n" for line in self._fzf_lines(view)),
-                stdout=subprocess.PIPE,
-                text=True,
-                check=False,
-                env={k: v for k, v in os.environ.items() if k not in _FZF_ENV_DROP},
-            )
+            with _line_files(here, everywhere) as files:
+                result: Any = self._runner(
+                    argv,
+                    # The list that matches the starting query: `change` fires only on edits.
+                    input="".join(line + "\n" for line in (everywhere if searching else here)),
+                    stdout=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    env={**{k: v for k, v in os.environ.items() if k not in _FZF_ENV_DROP}, **files},
+                )
             if result.returncode == _FZF_NO_MATCH:
                 no_match += 1
                 if no_match >= _MAX_NO_MATCH:
@@ -232,12 +285,13 @@ class Picker:
                 continue
             kind, _, rest = line.partition("\t")
             entry = rest.split("\t", 1)[0]
-            if kind == "folder" and entry in {f.path for f in view.folders}:
+            # Both lists come from `hosts`: any of its folders or hosts may be chosen.
+            if kind == "folder" and entry in {f.path for f in _all_folders(hosts)}:
                 folder = entry  # a shortcut on a folder just opens it
                 continue
-            hosts_here = {host.alias: host for host, _ in view.hosts}
-            if kind == "host" and entry in hosts_here:
-                return Selection(_ACTIONS[key], hosts_here[entry])
+            by_alias = {host.alias: host for host in hosts}
+            if kind == "host" and entry in by_alias:
+                return Selection(_ACTIONS[key], by_alias[entry])
             raise HsmError("fzf returned a choice that is not on screen: not connecting.")
 
     @staticmethod
@@ -245,13 +299,14 @@ class Picker:
         return f"hsm › {folder or '/'}  ·  {_plural(len(view.hosts))}\n{_KEYS_HELP}"
 
     @staticmethod
-    def _fzf_lines(view: _View) -> list[str]:
-        paths = [f"{rel}/{h.alias}" if rel else h.alias for h, rel in view.hosts]
-        width = max([len(f.name) + 1 for f in view.folders] + [len(p) for p in paths] + [1])
-        targets = [format_line(h).split("\t") for h, _ in view.hosts]
+    def _fzf_lines(folders: Sequence[_Folder], hosts: Sequence[tuple[Host, str]]) -> list[str]:
+        """Folder rows, then host rows; each host is shown after its path (may be empty)."""
+        paths = [f"{rel}/{h.alias}" if rel else h.alias for h, rel in hosts]
+        width = max([len(f.name) + 1 for f in folders] + [len(p) for p in paths] + [1])
+        targets = [format_line(h).split("\t") for h, _ in hosts]
         target_width = max([len(t[1]) for t in targets] + [1])
-        lines = [f"folder\t{f.path}\t{(f.name + '/').ljust(width)}  {_plural(f.count)}" for f in view.folders]
-        for (host, _), path, (_, target, tags, note) in zip(view.hosts, paths, targets, strict=True):
+        lines = [f"folder\t{f.path}\t{(f.name + '/').ljust(width)}  {_plural(f.count)}" for f in folders]
+        for (host, _), path, (_, target, tags, note) in zip(hosts, paths, targets, strict=True):
             shown = "  ".join(c for c in (path.ljust(width), target.ljust(target_width), tags, note) if c)
             lines.append(f"host\t{host.alias}\t{shown.rstrip()}")
         return lines
@@ -276,14 +331,14 @@ class Picker:
         if query:
             # An initial query (hsm -q): start from its results.
             try:
-                results = search([h for h, _ in _view(hosts, folder).hosts], query) or None
+                results = search(list(hosts), query) or None
             except SearchError as exc:
                 self._output(str(exc))
         while True:
             view = _view(hosts, folder)
             if results is None:
                 self._output(f"hsm › {folder or '/'}")
-                entries: list[_Folder | Host] = [*view.folders, *(h for h, rel in view.hosts if not rel)]
+                entries: list[_Folder | Host] = [*view.folders, *view.own_hosts]
             else:
                 entries = list(results)
             self._show(entries)
@@ -306,7 +361,7 @@ class Picker:
                     continue
                 return Selection("connect", chosen)
             try:
-                found = search([h for h, _ in view.hosts], answer)
+                found = search(list(hosts), answer)
             except SearchError as exc:
                 self._output(str(exc))
                 continue
